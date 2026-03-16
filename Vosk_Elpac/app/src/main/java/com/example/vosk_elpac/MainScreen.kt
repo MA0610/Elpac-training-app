@@ -32,6 +32,7 @@ import androidx.compose.ui.window.Dialog
 import com.example.vosk_elpac.model.*
 import kotlin.math.roundToInt
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun MainScreen(viewModel: MainViewModel) {
     val uiState by viewModel.uiState.collectAsState()
@@ -110,6 +111,59 @@ fun MainScreen(viewModel: MainViewModel) {
                             ComparisonSection(
                                 comparison = cmp,
                                 targetPhrase = session.targetPhrase
+                            )
+                        }
+
+                        // ── ELPAC level badge ──────────────────────────────
+                        uiState.elpacLevel?.let { level ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(Color(0xFF12122A))
+                                    .padding(horizontal = 16.dp, vertical = 12.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                Text(
+                                    "ELPAC level",
+                                    color = Color(0xFF9E9E9E),
+                                    fontSize = 13.sp
+                                )
+                                Box(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(20.dp))
+                                        .background(
+                                            when {
+                                                level.startsWith("Level 4") -> Color(0xFF0D2A0D)
+                                                level.startsWith("Level 3") -> Color(0xFF2A200A)
+                                                level.startsWith("Level 2") -> Color(0xFF2A1A0A)
+                                                else -> Color(0xFF2A0A0A)
+                                            }
+                                        )
+                                        .padding(horizontal = 12.dp, vertical = 5.dp)
+                                ) {
+                                    Text(
+                                        level,
+                                        color = when {
+                                            level.startsWith("Level 4") -> Color(0xFF81C784)
+                                            level.startsWith("Level 3") -> Color(0xFFFFD54F)
+                                            level.startsWith("Level 2") -> Color(0xFFFFB74D)
+                                            else -> Color(0xFFEF9A9A)
+                                        },
+                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                }
+                            }
+                        }
+
+                        // ── Transcript feedback (colored word highlights) ───
+                        session.targetPhrase?.let { phrase ->
+                            TranscriptFeedbackSection(
+                                targetPhrase = phrase,
+                                phonemes = session.phonemes,
+                                comparison = session.comparison
                             )
                         }
 
@@ -209,7 +263,7 @@ fun MainScreen(viewModel: MainViewModel) {
     }
 }
 
-// ── Target Phrase Section ──────────────────────────────────────────────────
+// ── Target Phrase Section ──────────────────────────────────────────────────────
 
 @Composable
 private fun TargetPhraseSection(
@@ -252,7 +306,6 @@ private fun TargetPhraseSection(
         }
 
         if (targetPhrase != null) {
-            // Show active target phrase
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -285,7 +338,6 @@ private fun TargetPhraseSection(
                 color = Color(0xFF616161)
             )
         } else {
-            // Custom phrase input
             OutlinedTextField(
                 value = customText,
                 onValueChange = onCustomTextChange,
@@ -316,7 +368,7 @@ private fun TargetPhraseSection(
     }
 }
 
-// ── Phrase Selector Dialog ─────────────────────────────────────────────────
+// ── Phrase Selector Dialog ─────────────────────────────────────────────────────
 
 @Composable
 private fun PhraseSelectorDialog(
@@ -351,7 +403,6 @@ private fun PhraseSelectorDialog(
                 }
             }
 
-            // Custom phrase input
             OutlinedTextField(
                 value = customText,
                 onValueChange = onCustomTextChange,
@@ -380,10 +431,13 @@ private fun PhraseSelectorDialog(
 
             Divider(color = Color(0xFF2A2A4A))
 
-            Text("ELPAC Phrases", color = Color(0xFF9E9E9E), fontSize = 12.sp,
-                fontWeight = FontWeight.SemiBold)
+            Text(
+                "ELPAC Phrases",
+                color = Color(0xFF9E9E9E),
+                fontSize = 12.sp,
+                fontWeight = FontWeight.SemiBold
+            )
 
-            // Grouped preset phrases
             LazyColumn(
                 modifier = Modifier.heightIn(max = 360.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
@@ -424,7 +478,7 @@ private fun PhraseSelectorDialog(
     }
 }
 
-// ── Comparison Section ─────────────────────────────────────────────────────
+// ── Comparison Section ─────────────────────────────────────────────────────────
 
 @Composable
 private fun ComparisonSection(
@@ -446,7 +500,6 @@ private fun ComparisonSection(
             fontWeight = FontWeight.SemiBold
         )
 
-        // Big accuracy number
         val color = scoreColor(comparison.accuracyPct)
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -466,7 +519,6 @@ private fun ComparisonSection(
             }
         }
 
-        // Feedback message
         val feedback = when {
             comparison.accuracyPct >= 90f -> "Excellent! Your pronunciation is very accurate."
             comparison.accuracyPct >= 75f -> "Good job! A few phonemes need work."
@@ -483,21 +535,23 @@ private fun ComparisonSection(
     }
 }
 
-// ── Expected vs Actual Row ─────────────────────────────────────────────────
+// ── Expected vs Actual Row ─────────────────────────────────────────────────────
 
 @Composable
 private fun ExpectedVsActualRow(comparison: PhonemeComparison) {
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        // Header labels
         Row(modifier = Modifier.fillMaxWidth()) {
-            Text("Expected", color = Color(0xFF4FC3F7), fontSize = 11.sp,
-                fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
-            Text("You said", color = Color(0xFF9E9E9E), fontSize = 11.sp,
+            Text(
+                "Expected", color = Color(0xFF4FC3F7), fontSize = 11.sp,
+                fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f)
+            )
+            Text(
+                "You said", color = Color(0xFF9E9E9E), fontSize = 11.sp,
                 fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f),
-                textAlign = TextAlign.End)
+                textAlign = TextAlign.End
+            )
         }
 
-        // Pair up expected and actual phonemes side by side
         val pairs = comparison.expectedPhonemes.zip(
             comparison.actualPhonemes.map { it.phoneme } +
                     List((comparison.expectedPhonemes.size - comparison.actualPhonemes.size)
@@ -509,8 +563,7 @@ private fun ExpectedVsActualRow(comparison: PhonemeComparison) {
             contentPadding = PaddingValues(vertical = 4.dp)
         ) {
             items(pairs) { (expected, actual) ->
-                val isMatch = expected == actual ||
-                        phonemesMatchUi(expected, actual)
+                val isMatch = expected == actual || phonemesMatchUi(expected, actual)
                 Column(
                     modifier = Modifier
                         .clip(RoundedCornerShape(8.dp))
@@ -552,13 +605,17 @@ private fun ExpectedVsActualRow(comparison: PhonemeComparison) {
             horizontalArrangement = Arrangement.spacedBy(16.dp),
             modifier = Modifier.padding(top = 4.dp)
         ) {
-            Row(verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
                 Box(Modifier.size(8.dp).clip(CircleShape).background(Color(0xFF66BB6A)))
                 Text("Correct", fontSize = 10.sp, color = Color(0xFF9E9E9E))
             }
-            Row(verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
                 Box(Modifier.size(8.dp).clip(CircleShape).background(Color(0xFFEF5350)))
                 Text("Needs work", fontSize = 10.sp, color = Color(0xFF9E9E9E))
             }
@@ -566,19 +623,18 @@ private fun ExpectedVsActualRow(comparison: PhonemeComparison) {
     }
 }
 
-// Simple helper used only in the UI layer
 private fun phonemesMatchUi(a: String, b: String): Boolean {
     if (a == b) return true
     val similar = setOf(
-        setOf("ɪ","iː"), setOf("ʌ","ɑ"), setOf("ɛ","æ"),
-        setOf("ʊ","uː"), setOf("ɔ","oʊ"), setOf("ð","θ"),
-        setOf("s","z"),  setOf("f","v"),  setOf("p","b"),
-        setOf("t","d"),  setOf("k","ɡ"),  setOf("ʃ","ʒ")
+        setOf("ɪ", "iː"), setOf("ʌ", "ɑ"), setOf("ɛ", "æ"),
+        setOf("ʊ", "uː"), setOf("ɔ", "oʊ"), setOf("ð", "θ"),
+        setOf("s", "z"),  setOf("f", "v"),   setOf("p", "b"),
+        setOf("t", "d"),  setOf("k", "ɡ"),   setOf("ʃ", "ʒ")
     )
     return similar.any { it.contains(a) && it.contains(b) }
 }
 
-// ── Existing composables (unchanged) ──────────────────────────────────────
+// ── Existing composables (unchanged) ──────────────────────────────────────────
 
 @Composable
 private fun AppHeader() {
@@ -682,14 +738,14 @@ private fun ScoreSection(score: PronunciationScore) {
 private fun PhonemeChip(phoneme: PhonemeResult, isSelected: Boolean, onClick: () -> Unit) {
     val isCorrect = phoneme.isCorrect
     val bg = when {
-        isSelected  -> Color(0xFF1E3A5F)
-        !isCorrect  -> Color(0xFF2A0D0D)
-        else        -> Color(0xFF1A1A2E)
+        isSelected -> Color(0xFF1E3A5F)
+        !isCorrect -> Color(0xFF2A0D0D)
+        else       -> Color(0xFF1A1A2E)
     }
     val border = when {
-        isSelected  -> Color(0xFF4FC3F7)
-        !isCorrect  -> Color(0xFFEF5350)
-        else        -> Color.Transparent
+        isSelected -> Color(0xFF4FC3F7)
+        !isCorrect -> Color(0xFFEF5350)
+        else       -> Color.Transparent
     }
     Column(
         modifier = Modifier
@@ -700,8 +756,10 @@ private fun PhonemeChip(phoneme: PhonemeResult, isSelected: Boolean, onClick: ()
             .padding(horizontal = 10.dp, vertical = 8.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Text(phoneme.phoneme, fontSize = 20.sp, fontFamily = FontFamily.Serif,
-            color = Color.White, fontWeight = FontWeight.Bold)
+        Text(
+            phoneme.phoneme, fontSize = 20.sp, fontFamily = FontFamily.Serif,
+            color = Color.White, fontWeight = FontWeight.Bold
+        )
         phoneme.expectedPhoneme?.let { exp ->
             if (exp != phoneme.phoneme) {
                 Text("→$exp", fontSize = 9.sp, color = Color(0xFFEF5350))
@@ -716,13 +774,17 @@ private fun PhonemeChip(phoneme: PhonemeResult, isSelected: Boolean, onClick: ()
 private fun TimelineKey() {
     LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         val categories = mapOf(
-            "Vowel" to Color(0xFF4FC3F7), "Stop" to Color(0xFFEF9A9A),
-            "Fricative" to Color(0xFFA5D6A7), "Nasal" to Color(0xFFCE93D8),
-            "Liquid" to Color(0xFFFFCC02)
+            "Vowel"     to Color(0xFF4FC3F7),
+            "Stop"      to Color(0xFFEF9A9A),
+            "Fricative" to Color(0xFFA5D6A7),
+            "Nasal"     to Color(0xFFCE93D8),
+            "Liquid"    to Color(0xFFFFCC02)
         )
         items(categories.entries.toList()) { (name, color) ->
-            Row(verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
                 Box(Modifier.size(8.dp).clip(RoundedCornerShape(2.dp)).background(color))
                 Text(name, fontSize = 10.sp, color = Color(0xFF9E9E9E))
             }
@@ -740,8 +802,10 @@ private fun SectionCard(title: String, content: @Composable ColumnScope.() -> Un
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        Text(title, style = MaterialTheme.typography.titleSmall,
-            color = Color(0xFF9E9E9E), fontWeight = FontWeight.SemiBold)
+        Text(
+            title, style = MaterialTheme.typography.titleSmall,
+            color = Color(0xFF9E9E9E), fontWeight = FontWeight.SemiBold
+        )
         content()
     }
 }
@@ -753,8 +817,11 @@ private fun ErrorCard(message: String, onDismiss: () -> Unit) {
         colors = CardDefaults.cardColors(containerColor = Color(0xFF3A1A1A)),
         shape = RoundedCornerShape(12.dp)
     ) {
-        Row(modifier = Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        Row(
+            modifier = Modifier.padding(16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
             Icon(Icons.Default.Warning, null, tint = Color(0xFFEF5350))
             Text(message, Modifier.weight(1f), color = Color.White, fontSize = 14.sp)
             IconButton(onClick = onDismiss) {

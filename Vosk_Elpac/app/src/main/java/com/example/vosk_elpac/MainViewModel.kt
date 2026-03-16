@@ -23,7 +23,7 @@ data class MainUiState(
     val selectedPhoneme: PhonemeResult? = null,
     val errorMessage: String? = null,
     val recordingDurationMs: Long = 0L,
-    // Target phrase state
+    val elpacLevel: String? = null,          // e.g. "Level 3 – Generally intelligible"
     val targetPhrase: TargetPhrase? = null,
     val customPhraseText: String = "",
     val showPhraseSelector: Boolean = false
@@ -41,7 +41,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val liveWaveformBuffer = mutableListOf<WaveformPoint>()
     private var sampleCount = 0L
 
-    // ─── Permission ───────────────────────────────────────────────────────────
+    // ── Permission ─────────────────────────────────────────────────────────
 
     fun onPermissionDenied() {
         _uiState.update {
@@ -49,15 +49,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    // ─── Phrase selection ─────────────────────────────────────────────────────
+    // ── Phrase selection ───────────────────────────────────────────────────
 
-    fun showPhraseSelector() {
-        _uiState.update { it.copy(showPhraseSelector = true) }
-    }
-
-    fun hidePhraseSelector() {
-        _uiState.update { it.copy(showPhraseSelector = false) }
-    }
+    fun showPhraseSelector()  { _uiState.update { it.copy(showPhraseSelector = true) } }
+    fun hidePhraseSelector()  { _uiState.update { it.copy(showPhraseSelector = false) } }
 
     fun selectPresetPhrase(phrase: TargetPhrase) {
         _uiState.update {
@@ -66,14 +61,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 customPhraseText = phrase.text,
                 showPhraseSelector = false,
                 session = null,
-                selectedPhoneme = null
+                selectedPhoneme = null,
+                elpacLevel = null
             )
         }
     }
 
-    fun setCustomPhrase(text: String) {
-        _uiState.update { it.copy(customPhraseText = text) }
-    }
+    fun setCustomPhrase(text: String) { _uiState.update { it.copy(customPhraseText = text) } }
 
     fun confirmCustomPhrase() {
         val text = _uiState.value.customPhraseText.trim()
@@ -83,7 +77,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 targetPhrase = TargetPhrase(text, "Custom"),
                 showPhraseSelector = false,
                 session = null,
-                selectedPhoneme = null
+                selectedPhoneme = null,
+                elpacLevel = null
             )
         }
     }
@@ -94,12 +89,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 targetPhrase = null,
                 customPhraseText = "",
                 session = null,
-                selectedPhoneme = null
+                selectedPhoneme = null,
+                elpacLevel = null
             )
         }
     }
 
-    // ─── Recording control ────────────────────────────────────────────────────
+    // ── Recording control ──────────────────────────────────────────────────
 
     fun startRecording() {
         val ctx = getApplication<Application>()
@@ -123,15 +119,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 errorMessage = null,
                 liveWaveform = emptyList(),
                 liveLevel = 0f,
-                recordingDurationMs = 0L
+                recordingDurationMs = 0L,
+                elpacLevel = null
             )
         }
 
         recordingJob = viewModelScope.launch {
             try {
                 recorder.recordingFlow(getApplication()).collect { chunk ->
-                    val rms = recorder.chunkRmsLevel(chunk)
-                    val timeMs = System.currentTimeMillis() - startTimeMs
+                    val rms       = recorder.chunkRmsLevel(chunk)
+                    val timeMs    = System.currentTimeMillis() - startTimeMs
                     val amplitude = chunk.maxOrNull()?.toFloat()?.div(Short.MAX_VALUE) ?: 0f
                     liveWaveformBuffer.add(WaveformPoint(timeMs, amplitude))
                     sampleCount += chunk.size
@@ -164,13 +161,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch { analyzeRecording() }
     }
 
-    // ─── Analysis ─────────────────────────────────────────────────────────────
+    // ── Analysis ───────────────────────────────────────────────────────────
 
     private suspend fun analyzeRecording() {
         val samples = recorder.getAllSamples()
 
-        // DEBUG — remove after fixing
-        android.util.Log.d("PhonemeDEBUG", "Samples: ${samples.size}, max=${samples.maxOrNull()}, nonzero=${samples.count { it != 0.toShort() }}")
+        android.util.Log.d("PhonemeDEBUG",
+            "Samples: ${samples.size}, max=${samples.maxOrNull()}, " +
+                    "nonzero=${samples.count { it != 0.toShort() }}")
 
         if (samples.size < AudioRecorder.SAMPLE_RATE / 2) {
             _uiState.update {
@@ -185,131 +183,87 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         try {
             val targetPhrase = _uiState.value.targetPhrase
 
-            // Get expected phonemes from the target phrase (if set)
+            // Expected phoneme sequence from CMU dict
             val expectedPhonemes: List<String> = targetPhrase?.let {
                 detector.getPhraseExpectedPhonemes(it.text)
             } ?: emptyList()
 
-            // Run Vosk recognition
-            val rawPhonemes = detector.detect(samples)
+            // Raw Vosk recognition
+            val rawPhonemes    = detector.detect(samples)
+            val nonSilPhonemes = rawPhonemes.filter { it.phoneme != "∅" }
 
-            // DEBUG — remove after fixing
-            android.util.Log.d("PhonemeDEBUG", "=== TARGET PHRASE: ${targetPhrase?.text} ===")
-            android.util.Log.d("PhonemeDEBUG", "Expected phonemes (${expectedPhonemes.size}): $expectedPhonemes")
-            android.util.Log.d("PhonemeDEBUG", "Raw actual phonemes (${rawPhonemes.size}): ${rawPhonemes.map { it.phoneme }}")
+            android.util.Log.d("PhonemeDEBUG", "=== TARGET: ${targetPhrase?.text} ===")
+            android.util.Log.d("PhonemeDEBUG",
+                "Expected (${expectedPhonemes.size}): $expectedPhonemes")
+            android.util.Log.d("PhonemeDEBUG",
+                "Actual   (${nonSilPhonemes.size}): ${nonSilPhonemes.map { it.phoneme }}")
 
-            // FIX 1: Strip silence phonemes before alignment — silences burn
-            // through expected slots and cause everything to mismatch
-            val nonSilentPhonemes = rawPhonemes.filter { it.phoneme != "∅" }
-            android.util.Log.d("PhonemeDEBUG", "After silence strip (${nonSilentPhonemes.size}): ${nonSilentPhonemes.map { it.phoneme }}")
-
-            // If we have a target, annotate each actual phoneme with correctness
+            // ── Needleman-Wunsch alignment (replaces greedy annotateWithExpected) ──
             val annotatedPhonemes = if (expectedPhonemes.isNotEmpty()) {
-                annotateWithExpected(nonSilentPhonemes, expectedPhonemes)
+                detector.alignPhonemes(nonSilPhonemes, expectedPhonemes)
             } else {
-                nonSilentPhonemes
+                nonSilPhonemes
             }
 
-            // Build comparison if target phrase is set
+            // Build comparison
             val comparison = if (expectedPhonemes.isNotEmpty()) {
                 buildComparison(expectedPhonemes, annotatedPhonemes)
             } else null
 
-            android.util.Log.d("PhonemeDEBUG", "Matched: ${comparison?.matchedCount} / ${comparison?.totalExpected}, accuracy=${comparison?.accuracyPct}")
+            android.util.Log.d("PhonemeDEBUG",
+                "Matched: ${comparison?.matchedCount} / ${comparison?.totalExpected}, " +
+                        "accuracy=${comparison?.accuracyPct}")
 
             val score = detector.computeOverallScore(annotatedPhonemes, comparison)
-            val waveform = recorder.buildWaveform(samples)
 
-            val session = AnalysisSession(
+            // ELPAC level derived from overall score
+            val elpacLevel = detector.elpacLevel(score.overallScore)
+
+            val waveform = recorder.buildWaveform(samples)
+            val session  = AnalysisSession(
                 audioSamples = samples,
-                sampleRate = AudioRecorder.SAMPLE_RATE,
-                phonemes = annotatedPhonemes,
-                score = score,
-                waveform = waveform,
+                sampleRate   = AudioRecorder.SAMPLE_RATE,
+                phonemes     = annotatedPhonemes,
+                score        = score,
+                waveform     = waveform,
                 targetPhrase = targetPhrase,
-                comparison = comparison
+                comparison   = comparison
             )
 
             _uiState.update {
-                it.copy(recordingState = RecordingState.DONE, session = session)
+                it.copy(
+                    recordingState = RecordingState.DONE,
+                    session        = session,
+                    elpacLevel     = elpacLevel
+                )
             }
         } catch (e: Exception) {
             _uiState.update {
                 it.copy(
                     recordingState = RecordingState.ERROR,
-                    errorMessage = "Analysis failed: ${e.message}"
+                    errorMessage   = "Analysis failed: ${e.message}"
                 )
             }
         }
-    }
-
-    /**
-     * Aligns actual phonemes against the expected sequence using a simple
-     * greedy alignment and marks each as correct/incorrect.
-     *
-     * NOTE: silences must be stripped from [actual] before calling this.
-     */
-    private fun annotateWithExpected(
-        actual: List<PhonemeResult>,
-        expected: List<String>
-    ): List<PhonemeResult> {
-        if (actual.isEmpty() || expected.isEmpty()) return actual
-
-        val annotated = mutableListOf<PhonemeResult>()
-        var expIdx = 0
-
-        for (act in actual) {
-            if (expIdx < expected.size) {
-                val exp = expected[expIdx]
-                val isCorrect = phonemesMatch(act.phoneme, exp)
-                annotated.add(
-                    act.copy(
-                        isCorrect = isCorrect,
-                        expectedPhoneme = exp,
-                        score = if (isCorrect) act.score else (act.score * 0.4f)
-                    )
-                )
-                expIdx++
-            } else {
-                // Extra phonemes beyond expected — mark as inserted
-                annotated.add(act.copy(isCorrect = false, expectedPhoneme = null))
-            }
-        }
-        return annotated
-    }
-
-    /**
-     * Two phonemes "match" if identical or acoustically close (voicing pairs,
-     * reduced vowels, etc.).
-     */
-    private fun phonemesMatch(actual: String, expected: String): Boolean {
-        if (actual == expected) return true
-        val similar = setOf(
-            setOf("ɪ", "iː"), setOf("ʌ", "ɑ"), setOf("ɛ", "æ"),
-            setOf("ʊ", "uː"), setOf("ɔ", "oʊ"), setOf("ð", "θ"),
-            setOf("s", "z"),  setOf("f", "v"),   setOf("p", "b"),
-            setOf("t", "d"),  setOf("k", "ɡ"),   setOf("ʃ", "ʒ")
-        )
-        return similar.any { it.contains(actual) && it.contains(expected) }
     }
 
     private fun buildComparison(
         expected: List<String>,
         actual: List<PhonemeResult>
     ): PhonemeComparison {
-        val matched = actual.count { it.isCorrect }
+        val matched  = actual.count { it.isCorrect }
         val accuracy = if (expected.isEmpty()) 0f
         else (matched.toFloat() / expected.size * 100f).coerceIn(0f, 100f)
         return PhonemeComparison(
             expectedPhonemes = expected,
-            actualPhonemes = actual,
-            matchedCount = matched,
-            totalExpected = expected.size,
-            accuracyPct = accuracy
+            actualPhonemes   = actual,
+            matchedCount     = matched,
+            totalExpected    = expected.size,
+            accuracyPct      = accuracy
         )
     }
 
-    // ─── UI interaction ───────────────────────────────────────────────────────
+    // ── UI interaction ─────────────────────────────────────────────────────
 
     fun selectPhoneme(phoneme: PhonemeResult?) {
         _uiState.update { it.copy(selectedPhoneme = phoneme) }
@@ -320,7 +274,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         recordingJob?.cancel()
         recordingJob = null
         liveWaveformBuffer.clear()
-        // Keep the target phrase so student can try again immediately
         val phrase = _uiState.value.targetPhrase
         val text   = _uiState.value.customPhraseText
         _uiState.update { MainUiState(targetPhrase = phrase, customPhraseText = text) }
