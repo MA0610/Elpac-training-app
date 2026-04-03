@@ -1,3 +1,7 @@
+# Large model files — stored in GitHub Releases, not the repo
+*.onnx
+*.onnx.data
+
 *.iml
 .gradle
 /local.properties

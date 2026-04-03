@@ -3,10 +3,12 @@ package com.example.vosk_elpac.ml
 import android.content.Context
 import android.util.Log
 import com.example.vosk_elpac.audio.AudioRecorder
+import com.example.vosk_elpac.model.DetectionResult
 import com.example.vosk_elpac.model.PhonemeComparison
 import com.example.vosk_elpac.model.PhonemeInventory
 import com.example.vosk_elpac.model.PhonemeResult
 import com.example.vosk_elpac.model.PronunciationScore
+import com.example.vosk_elpac.model.WordTiming
 import org.json.JSONObject
 import org.vosk.Model
 import org.vosk.Recognizer
@@ -56,7 +58,10 @@ class PhonemeDetector(private val context: Context) {
             setOf("ʊ", "uː"), setOf("ɔ", "oʊ"),  setOf("ð", "θ"),
             setOf("s", "z"),  setOf("f", "v"),    setOf("p", "b"),
             setOf("t", "d"),  setOf("k", "ɡ"),    setOf("ʃ", "ʒ"),
-            setOf("m", "n"),  setOf("tʃ", "dʒ"),  setOf("ɝ", "ʌ")
+            setOf("m", "n"),  setOf("tʃ", "dʒ"),  setOf("ɝ", "ʌ"),
+            // eSpeak long/short vowel equivalents (model may produce either form)
+            setOf("ɑ", "ɑː"), setOf("ɔ", "ɔː"),  setOf("ɜː", "ɝ"),
+            setOf("iː", "i"), setOf("uː", "u")
         )
 
         // ── ELPAC level thresholds (0-100 mapped to rubric 1-4) ────────────
@@ -119,9 +124,13 @@ class PhonemeDetector(private val context: Context) {
 
     private val cmuDict: Map<String, List<String>> by lazy { loadCmuDict() }
 
+    /** Wav2Vec2 ONNX detector — primary acoustic engine. */
+    private val wav2vec2 = Wav2Vec2PhonemeDetector(context)
+
     init {
         useFallback = !loadModel()
         if (useFallback) Log.w(TAG, "Vosk model not found — will use DSP fallback.")
+        if (wav2vec2.isAvailable) Log.i(TAG, "Wav2Vec2 model ready — using real acoustic scoring.")
     }
 
     // ── Vosk model loading ─────────────────────────────────────────────────
@@ -186,6 +195,12 @@ class PhonemeDetector(private val context: Context) {
         return dict
     }
 
+    // ── Model download ─────────────────────────────────────────────────────
+
+    suspend fun prepareWav2Vec2(onProgress: (Float) -> Unit) {
+        wav2vec2.downloadAndInit(onProgress)
+    }
+
     // ── Public: expected IPA phonemes for a phrase ─────────────────────────
 
     fun getPhraseExpectedPhonemes(phrase: String): List<String> {
@@ -206,11 +221,90 @@ class PhonemeDetector(private val context: Context) {
 
     // ── Main entry point ───────────────────────────────────────────────────
 
-    fun detect(samples: ShortArray): List<PhonemeResult> {
-        if (samples.isEmpty()) return emptyList()
-        return if (!useFallback && model != null) runVoskRecognition(samples)
-        else runDspFallback(samples)
+    /**
+     * Detect phonemes and word timing from audio samples.
+     *
+     * Priority:
+     *   1. Wav2Vec2 (real per-phoneme acoustic scores) + Vosk (word timing)
+     *   2. Vosk only (word-confidence proxy scores)
+     *   3. DSP fallback (energy-based, last resort)
+     */
+    fun detect(samples: ShortArray): DetectionResult {
+        if (samples.isEmpty()) return DetectionResult(emptyList(), emptyList())
+
+        return when {
+            wav2vec2.isAvailable -> runHybridDetection(samples)
+            !useFallback && model != null ->
+                DetectionResult(runVoskRecognition(samples), emptyList())
+            else ->
+                DetectionResult(runDspFallback(samples), emptyList())
+        }
     }
+
+    private fun runHybridDetection(samples: ShortArray): DetectionResult {
+        // Primary: Wav2Vec2 for real per-phoneme acoustic scores
+        val acousticPhonemes = wav2vec2.detectPhonemes(samples)
+
+        // Secondary: Vosk for word-boundary timing only (confidence ignored)
+        val wordTimings = if (!useFallback && model != null) {
+            extractWordTimings(samples)
+        } else emptyList()
+
+        val phonemes = if (acousticPhonemes.isNotEmpty()) {
+            acousticPhonemes
+        } else {
+            Log.w(TAG, "Wav2Vec2 returned empty — falling back to Vosk")
+            if (!useFallback && model != null) runVoskRecognition(samples)
+            else runDspFallback(samples)
+        }
+
+        return DetectionResult(phonemes, wordTimings)
+    }
+
+    /**
+     * Extracts word-level timing boundaries from Vosk (word, startMs, endMs).
+     * Only used for word highlighting — confidence values are discarded.
+     */
+    fun extractWordTimings(samples: ShortArray): List<WordTiming> {
+        val voskModel = model ?: return emptyList()
+        return try {
+            val rec = Recognizer(voskModel, SAMPLE_RATE.toFloat())
+            rec.setWords(true)
+            val bytes     = shortsToBytes(samples)
+            val chunkSize = 8000
+            var offset    = 0
+            while (offset < bytes.size) {
+                val end = minOf(offset + chunkSize, bytes.size)
+                rec.acceptWaveForm(bytes.copyOfRange(offset, end), end - offset)
+                offset = end
+            }
+            val json = rec.finalResult
+            rec.close()
+            parseWordTimings(json)
+        } catch (e: Exception) {
+            Log.w(TAG, "Word timing extraction failed: ${e.message}")
+            emptyList()
+        }
+    }
+
+    private fun parseWordTimings(json: String): List<WordTiming> {
+        return try {
+            val obj       = JSONObject(json)
+            val wordArray = obj.optJSONArray("result") ?: return emptyList()
+            (0 until wordArray.length()).map { i ->
+                val w = wordArray.getJSONObject(i)
+                WordTiming(
+                    word    = w.getString("word").lowercase().trim(),
+                    startMs = (w.getDouble("start") * 1000).toLong(),
+                    endMs   = (w.getDouble("end")   * 1000).toLong()
+                )
+            }
+        } catch (e: Exception) { emptyList() }
+    }
+
+    /** Returns expected IPA phonemes for a single word (used to enrich WordTiming). */
+    fun getWordExpectedPhonemes(word: String): List<String> =
+        lookupPhonemes(word).mapNotNull { PhonemeInventory.ARPABET_TO_IPA[it] }
 
     // ── Vosk recognition ───────────────────────────────────────────────────
 
@@ -752,5 +846,6 @@ class PhonemeDetector(private val context: Context) {
     fun close() {
         model?.close()
         model = null
+        wav2vec2.close()
     }
 }

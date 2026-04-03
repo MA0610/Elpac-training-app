@@ -47,6 +47,9 @@ android {
         resources {
             excludes += '/META-INF/{AL2.0,LGPL2.1}'
         }
+        jniLibs {
+            pickFirsts += ['**/libonnxruntime*.so']
+        }
     }
 }
 
@@ -80,5 +83,8 @@ dependencies {
     androidTestImplementation 'androidx.test.ext:junit:1.1.5'
 
     implementation 'com.alphacephei:vosk-android:0.3.47'
+
+    // ONNX Runtime for Wav2Vec2 phoneme model (1.19+ required for ONNX IR version 10)
+    implementation 'com.microsoft.onnxruntime:onnxruntime-android:1.20.0'
 
 }

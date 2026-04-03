@@ -52,6 +52,28 @@ fun MainScreen(viewModel: MainViewModel) {
         ) {
             AppHeader()
 
+            // ── Model download progress ────────────────────────────────────
+            if (uiState.modelStatus == ModelStatus.CHECKING ||
+                uiState.modelStatus == ModelStatus.DOWNLOADING) {
+                ModelDownloadCard(
+                    status   = uiState.modelStatus,
+                    progress = uiState.modelDownloadProgress
+                )
+            }
+            if (uiState.modelStatus == ModelStatus.FAILED) {
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFF3D1A1A)),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        "Model download failed. Check internet connection and restart the app.",
+                        color = Color(0xFFFF6B6B),
+                        modifier = Modifier.padding(16.dp),
+                        textAlign = TextAlign.Center
+                    )
+                }
+            }
+
             // ── Target Phrase Section ──────────────────────────────────────
             TargetPhraseSection(
                 targetPhrase = uiState.targetPhrase,
@@ -162,8 +184,9 @@ fun MainScreen(viewModel: MainViewModel) {
                         session.targetPhrase?.let { phrase ->
                             TranscriptFeedbackSection(
                                 targetPhrase = phrase,
-                                phonemes = session.phonemes,
-                                comparison = session.comparison
+                                phonemes     = session.phonemes,
+                                comparison   = session.comparison,
+                                wordTimings  = session.wordTimings
                             )
                         }
 
@@ -826,6 +849,43 @@ private fun ErrorCard(message: String, onDismiss: () -> Unit) {
             Text(message, Modifier.weight(1f), color = Color.White, fontSize = 14.sp)
             IconButton(onClick = onDismiss) {
                 Icon(Icons.Default.Close, null, tint = Color(0xFF9E9E9E))
+            }
+        }
+    }
+}
+
+@Composable
+private fun ModelDownloadCard(status: ModelStatus, progress: Float) {
+    Card(
+        colors = CardDefaults.cardColors(containerColor = Color(0xFF1A1A2E)),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(
+            modifier = Modifier.padding(20.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            if (status == ModelStatus.CHECKING) {
+                CircularProgressIndicator(color = Color(0xFF7C6AF7))
+                Text("Loading phoneme model…", color = Color.White, fontSize = 14.sp)
+            } else {
+                Text(
+                    "Downloading phoneme model",
+                    color = Color.White,
+                    fontWeight = FontWeight.SemiBold,
+                    fontSize = 15.sp
+                )
+                LinearProgressIndicator(
+                    progress = progress,
+                    modifier = Modifier.fillMaxWidth(),
+                    color = Color(0xFF7C6AF7),
+                    trackColor = Color(0xFF2D2D44)
+                )
+                Text(
+                    "${(progress * 100).roundToInt()}%  —  first launch only",
+                    color = Color(0xFF9090B0),
+                    fontSize = 12.sp
+                )
             }
         }
     }

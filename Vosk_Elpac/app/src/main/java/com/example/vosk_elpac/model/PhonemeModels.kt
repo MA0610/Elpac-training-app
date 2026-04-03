@@ -42,7 +42,27 @@ data class PhonemeComparison(
     val actualPhonemes: List<PhonemeResult>,
     val matchedCount: Int,
     val totalExpected: Int,
-    val accuracyPct: Float
+    val accuracyPct: Float,
+    val perWordExpectedCounts: List<Int> = emptyList()  // phoneme count per word from CMU dict
+)
+
+/**
+ * Word-level timing from Vosk ASR, enriched with CMU dict expected phonemes.
+ * Used to map Wav2Vec2 phonemes back to individual words for word highlighting.
+ */
+data class WordTiming(
+    val word: String,
+    val startMs: Long,
+    val endMs: Long,
+    val expectedPhonemes: List<String> = emptyList()  // IPA phonemes expected for this word
+)
+
+/**
+ * Combined result from the hybrid Wav2Vec2 + Vosk detection pipeline.
+ */
+data class DetectionResult(
+    val phonemes: List<PhonemeResult>,
+    val wordTimings: List<WordTiming>
 )
 
 enum class RecordingState {
@@ -61,7 +81,8 @@ data class AnalysisSession(
     val score: PronunciationScore,
     val waveform: List<WaveformPoint>,
     val targetPhrase: TargetPhrase? = null,
-    val comparison: PhonemeComparison? = null
+    val comparison: PhonemeComparison? = null,
+    val wordTimings: List<WordTiming> = emptyList()  // for word-level feedback
 ) {
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
@@ -95,10 +116,12 @@ enum class PhonemeCategory {
 
 object PhonemeInventory {
 
+    // ARPABET → IPA using eSpeak-compatible long vowel forms so that CMU dict
+    // expected phonemes align exactly with facebook/wav2vec2-lv-60-espeak-cv-ft output.
     val ARPABET_TO_IPA = mapOf(
-        "AA" to "ɑ",  "AE" to "æ",  "AH" to "ʌ",  "AO" to "ɔ",
+        "AA" to "ɑː", "AE" to "æ",  "AH" to "ʌ",  "AO" to "ɔː",
         "AW" to "aʊ", "AY" to "aɪ", "B"  to "b",   "CH" to "tʃ",
-        "D"  to "d",  "DH" to "ð",  "EH" to "ɛ",   "ER" to "ɝ",
+        "D"  to "d",  "DH" to "ð",  "EH" to "ɛ",   "ER" to "ɜː",
         "EY" to "eɪ", "F"  to "f",  "G"  to "ɡ",   "HH" to "h",
         "IH" to "ɪ",  "IY" to "iː", "JH" to "dʒ",  "K"  to "k",
         "L"  to "l",  "M"  to "m",  "N"  to "n",   "NG" to "ŋ",
@@ -108,7 +131,23 @@ object PhonemeInventory {
         "Y"  to "j",  "Z"  to "z",  "ZH" to "ʒ",   "SIL" to "∅"
     )
 
+    // Reverse map: eSpeak IPA → ARPABET (handles short/long variants eSpeak may produce)
+    val ESPEAK_TO_ARPABET = mapOf(
+        "æ"  to "AE", "ɑː" to "AA", "ɑ"  to "AA", "ʌ"  to "AH",
+        "ɔː" to "AO", "ɔ"  to "AO", "aʊ" to "AW", "aɪ" to "AY",
+        "ɛ"  to "EH", "ɜː" to "ER", "ɝ"  to "ER", "eɪ" to "EY",
+        "ɪ"  to "IH", "iː" to "IY", "i"  to "IY", "oʊ" to "OW",
+        "ɔɪ" to "OY", "ʊ"  to "UH", "uː" to "UW", "u"  to "UW",
+        "b"  to "B",  "tʃ" to "CH", "d"  to "D",  "ð"  to "DH",
+        "f"  to "F",  "ɡ"  to "G",  "h"  to "HH", "dʒ" to "JH",
+        "k"  to "K",  "l"  to "L",  "m"  to "M",  "n"  to "N",
+        "ŋ"  to "NG", "p"  to "P",  "ɹ"  to "R",  "r"  to "R",
+        "s"  to "S",  "ʃ"  to "SH", "t"  to "T",  "θ"  to "TH",
+        "v"  to "V",  "w"  to "W",  "j"  to "Y",  "z"  to "Z",  "ʒ" to "ZH"
+    )
+
     val PHONEME_INFO = mapOf(
+        // Short vowel forms (may appear in fast/reduced speech from eSpeak)
         "æ"  to PhonemeInfo("æ",  "cat",       PhonemeCategory.VOWEL),
         "ɑ"  to PhonemeInfo("ɑ",  "father",    PhonemeCategory.VOWEL),
         "ʌ"  to PhonemeInfo("ʌ",  "cup",       PhonemeCategory.VOWEL),
@@ -124,6 +163,10 @@ object PhonemeInventory {
         "ɔɪ" to PhonemeInfo("ɔɪ", "boy",       PhonemeCategory.VOWEL),
         "ʊ"  to PhonemeInfo("ʊ",  "book",      PhonemeCategory.VOWEL),
         "uː" to PhonemeInfo("uː", "food",      PhonemeCategory.VOWEL),
+        // eSpeak long vowel forms (primary output of wav2vec2-lv-60-espeak-cv-ft)
+        "ɑː" to PhonemeInfo("ɑː", "father",    PhonemeCategory.VOWEL),
+        "ɔː" to PhonemeInfo("ɔː", "thought",   PhonemeCategory.VOWEL),
+        "ɜː" to PhonemeInfo("ɜː", "bird",      PhonemeCategory.VOWEL),
         "b"  to PhonemeInfo("b",  "bat",       PhonemeCategory.CONSONANT_STOP),
         "d"  to PhonemeInfo("d",  "dog",       PhonemeCategory.CONSONANT_STOP),
         "ɡ"  to PhonemeInfo("ɡ",  "go",        PhonemeCategory.CONSONANT_STOP),

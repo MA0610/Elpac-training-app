@@ -23,6 +23,7 @@ import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.vosk_elpac.model.*
+import com.example.vosk_elpac.model.WordTiming
 import kotlin.math.roundToInt
 
 // ── Quality tier ──────────────────────────────────────────────────────────────
@@ -43,13 +44,99 @@ data class WordFeedback(
 fun buildWordFeedback(
     targetPhrase: TargetPhrase,
     phonemes: List<PhonemeResult>,
-    comparison: PhonemeComparison?
+    comparison: PhonemeComparison?,
+    wordTimings: List<WordTiming> = emptyList()
 ): List<WordFeedback> {
-    val words        = targetPhrase.text.trim().split("\\s+".toRegex())
-    val expectedAll  = comparison?.expectedPhonemes ?: emptyList()
-    val actualAll    = phonemes.filter { it.phoneme != "∅" }
+    val words       = targetPhrase.text.trim().split("\\s+".toRegex())
+    val expectedAll = comparison?.expectedPhonemes ?: emptyList()
+    val actualAll   = phonemes.filter { it.phoneme != "∅" }
     if (words.isEmpty() || expectedAll.isEmpty()) return emptyList()
 
+    // Case A: Vosk word timings available — assign phonemes by time overlap
+    if (wordTimings.isNotEmpty() && wordTimings.size == words.size) {
+        return buildFromTimings(words, actualAll, wordTimings)
+    }
+
+    // Case B: Use CMU dict per-word phoneme counts (fixes naive even-distribution)
+    val perWordCounts = comparison?.perWordExpectedCounts
+    if (!perWordCounts.isNullOrEmpty() && perWordCounts.size == words.size) {
+        return buildFromCmuCounts(words, actualAll, expectedAll, perWordCounts)
+    }
+
+    // Case C: Last resort — original even-distribution (only if no count data available)
+    return buildEvenDistribution(words, actualAll, expectedAll)
+}
+
+private fun buildFromTimings(
+    words: List<String>,
+    actualPhonemes: List<PhonemeResult>,
+    wordTimings: List<WordTiming>
+): List<WordFeedback> {
+    return words.mapIndexed { idx, word ->
+        val timing       = wordTimings[idx]
+        val wordActuals  = actualPhonemes.filter { ph ->
+            val midMs = (ph.startTimeMs + ph.endTimeMs) / 2L
+            midMs in timing.startMs..timing.endMs
+        }
+        val wordExpected = timing.expectedPhonemes
+
+        val avgScore = if (wordActuals.isEmpty()) 0f
+        else wordActuals.map { it.score }.average().toFloat()
+        val quality  = deriveQuality(wordActuals, avgScore)
+
+        WordFeedback(
+            word             = word,
+            quality          = quality,
+            phonemes         = wordActuals,
+            expectedPhonemes = wordExpected,
+            avgScore         = avgScore,
+            tip              = buildTip(word, wordActuals, wordExpected, quality)
+        )
+    }
+}
+
+private fun buildFromCmuCounts(
+    words: List<String>,
+    actualPhonemes: List<PhonemeResult>,
+    expectedAll: List<String>,
+    perWordCounts: List<Int>
+): List<WordFeedback> {
+    var expCursor = 0
+    var actCursor = 0
+
+    return words.mapIndexed { wordIdx, word ->
+        val isLast       = wordIdx == words.lastIndex
+        val wordExpCount = if (isLast) {
+            (expectedAll.size - expCursor).coerceAtLeast(1)
+        } else {
+            perWordCounts[wordIdx].coerceAtLeast(1)
+        }
+
+        val wordExpPhonemes = expectedAll.drop(expCursor).take(wordExpCount)
+        val wordActPhonemes = actualPhonemes.drop(actCursor).take(wordExpCount)
+        expCursor += wordExpCount
+        actCursor += wordExpCount
+
+        val avgScore = if (wordActPhonemes.isEmpty()) 0f
+        else wordActPhonemes.map { it.score }.average().toFloat()
+        val quality  = deriveQuality(wordActPhonemes, avgScore)
+
+        WordFeedback(
+            word             = word,
+            quality          = quality,
+            phonemes         = wordActPhonemes,
+            expectedPhonemes = wordExpPhonemes,
+            avgScore         = avgScore,
+            tip              = buildTip(word, wordActPhonemes, wordExpPhonemes, quality)
+        )
+    }
+}
+
+private fun buildEvenDistribution(
+    words: List<String>,
+    actualPhonemes: List<PhonemeResult>,
+    expectedAll: List<String>
+): List<WordFeedback> {
     val totalExpected = expectedAll.size
     val totalWords    = words.size
     var expCursor     = 0
@@ -64,19 +151,13 @@ fun buildWordFeedback(
         }
 
         val wordExpPhonemes = expectedAll.drop(expCursor).take(wordExpCount)
-        val wordActPhonemes = actualAll.drop(actCursor).take(wordExpCount)
+        val wordActPhonemes = actualPhonemes.drop(actCursor).take(wordExpCount)
         expCursor += wordExpCount
         actCursor += wordExpCount
 
         val avgScore = if (wordActPhonemes.isEmpty()) 0f
         else wordActPhonemes.map { it.score }.average().toFloat()
-
-        val quality = when {
-            wordActPhonemes.isEmpty()            -> WordQuality.UNMATCHED
-            wordActPhonemes.all { it.isCorrect } -> WordQuality.GOOD
-            avgScore >= 65f                      -> WordQuality.PARTIAL
-            else                                 -> WordQuality.POOR
-        }
+        val quality  = deriveQuality(wordActPhonemes, avgScore)
 
         WordFeedback(
             word             = word,
@@ -87,6 +168,13 @@ fun buildWordFeedback(
             tip              = buildTip(word, wordActPhonemes, wordExpPhonemes, quality)
         )
     }
+}
+
+private fun deriveQuality(phonemes: List<PhonemeResult>, avgScore: Float): WordQuality = when {
+    phonemes.isEmpty()            -> WordQuality.UNMATCHED
+    phonemes.all { it.isCorrect } -> WordQuality.GOOD
+    avgScore >= 65f               -> WordQuality.PARTIAL
+    else                          -> WordQuality.POOR
 }
 
 // ── Tips ──────────────────────────────────────────────────────────────────────
@@ -166,10 +254,11 @@ fun TranscriptFeedbackSection(
     targetPhrase: TargetPhrase,
     phonemes: List<PhonemeResult>,
     comparison: PhonemeComparison?,
+    wordTimings: List<WordTiming> = emptyList(),
     modifier: Modifier = Modifier
 ) {
-    val wordFeedbacks = remember(targetPhrase, phonemes, comparison) {
-        buildWordFeedback(targetPhrase, phonemes, comparison)
+    val wordFeedbacks = remember(targetPhrase, phonemes, comparison, wordTimings) {
+        buildWordFeedback(targetPhrase, phonemes, comparison, wordTimings)
     }
 
     var selectedWord by remember { mutableStateOf<WordFeedback?>(null) }

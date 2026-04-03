@@ -8,12 +8,16 @@ import androidx.lifecycle.viewModelScope
 import com.example.vosk_elpac.audio.AudioRecorder
 import com.example.vosk_elpac.ml.PhonemeDetector
 import com.example.vosk_elpac.model.*
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+
+enum class ModelStatus { CHECKING, DOWNLOADING, READY, FAILED }
 
 data class MainUiState(
     val recordingState: RecordingState = RecordingState.IDLE,
@@ -23,10 +27,12 @@ data class MainUiState(
     val selectedPhoneme: PhonemeResult? = null,
     val errorMessage: String? = null,
     val recordingDurationMs: Long = 0L,
-    val elpacLevel: String? = null,          // e.g. "Level 3 – Generally intelligible"
+    val elpacLevel: String? = null,
     val targetPhrase: TargetPhrase? = null,
     val customPhraseText: String = "",
-    val showPhraseSelector: Boolean = false
+    val showPhraseSelector: Boolean = false,
+    val modelStatus: ModelStatus = ModelStatus.CHECKING,
+    val modelDownloadProgress: Float = 0f
 )
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
@@ -40,6 +46,29 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var startTimeMs = 0L
     private val liveWaveformBuffer = mutableListOf<WaveformPoint>()
     private var sampleCount = 0L
+
+    init {
+        viewModelScope.launch {
+            try {
+                detector.prepareWav2Vec2 { progress ->
+                    _uiState.update {
+                        it.copy(
+                            modelStatus = ModelStatus.DOWNLOADING,
+                            modelDownloadProgress = progress
+                        )
+                    }
+                }
+                _uiState.update { it.copy(modelStatus = ModelStatus.READY) }
+            } catch (e: Exception) {
+                _uiState.update {
+                    it.copy(
+                        modelStatus = ModelStatus.FAILED,
+                        errorMessage = "Model download failed. Check internet connection and try again."
+                    )
+                }
+            }
+        }
+    }
 
     // ── Permission ─────────────────────────────────────────────────────────
 
@@ -106,6 +135,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
         if (_uiState.value.recordingState == RecordingState.RECORDING) return
+        if (_uiState.value.modelStatus != ModelStatus.READY) return
 
         liveWaveformBuffer.clear()
         sampleCount = 0L
@@ -188,17 +218,34 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 detector.getPhraseExpectedPhonemes(it.text)
             } ?: emptyList()
 
-            // Raw Vosk recognition
-            val rawPhonemes    = detector.detect(samples)
+            // Per-word phoneme counts from CMU dict (fixes naive even-distribution bug)
+            val perWordPhonemeCount: List<Int> = targetPhrase?.let { phrase ->
+                phrase.text.trim().split("\\s+".toRegex()).map { word ->
+                    detector.getPhraseExpectedPhonemes(word).size.coerceAtLeast(1)
+                }
+            } ?: emptyList()
+
+            // Detection: Wav2Vec2 (primary) + Vosk word timing (for word highlighting)
+            val detectionResult = withContext(Dispatchers.Default) {
+                detector.detect(samples)
+            }
+            val rawPhonemes    = detectionResult.phonemes
             val nonSilPhonemes = rawPhonemes.filter { it.phoneme != "∅" }
+
+            // Enrich word timings with CMU dict expected phonemes
+            val wordTimings = if (targetPhrase != null) {
+                enrichWordTimings(detectionResult.wordTimings, targetPhrase.text)
+            } else detectionResult.wordTimings
 
             android.util.Log.d("PhonemeDEBUG", "=== TARGET: ${targetPhrase?.text} ===")
             android.util.Log.d("PhonemeDEBUG",
                 "Expected (${expectedPhonemes.size}): $expectedPhonemes")
             android.util.Log.d("PhonemeDEBUG",
                 "Actual   (${nonSilPhonemes.size}): ${nonSilPhonemes.map { it.phoneme }}")
+            android.util.Log.d("PhonemeDEBUG",
+                "Word timings: ${wordTimings.map { "${it.word}(${it.startMs}-${it.endMs}ms)" }}")
 
-            // ── Needleman-Wunsch alignment (replaces greedy annotateWithExpected) ──
+            // ── Needleman-Wunsch alignment ──
             val annotatedPhonemes = if (expectedPhonemes.isNotEmpty()) {
                 detector.alignPhonemes(nonSilPhonemes, expectedPhonemes)
             } else {
@@ -207,7 +254,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
             // Build comparison
             val comparison = if (expectedPhonemes.isNotEmpty()) {
-                buildComparison(expectedPhonemes, annotatedPhonemes)
+                buildComparison(expectedPhonemes, annotatedPhonemes, perWordPhonemeCount)
             } else null
 
             android.util.Log.d("PhonemeDEBUG",
@@ -227,7 +274,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 score        = score,
                 waveform     = waveform,
                 targetPhrase = targetPhrase,
-                comparison   = comparison
+                comparison   = comparison,
+                wordTimings  = wordTimings
             )
 
             _uiState.update {
@@ -249,18 +297,32 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun buildComparison(
         expected: List<String>,
-        actual: List<PhonemeResult>
+        actual: List<PhonemeResult>,
+        perWordCounts: List<Int> = emptyList()
     ): PhonemeComparison {
         val matched  = actual.count { it.isCorrect }
         val accuracy = if (expected.isEmpty()) 0f
         else (matched.toFloat() / expected.size * 100f).coerceIn(0f, 100f)
         return PhonemeComparison(
-            expectedPhonemes = expected,
-            actualPhonemes   = actual,
-            matchedCount     = matched,
-            totalExpected    = expected.size,
-            accuracyPct      = accuracy
+            expectedPhonemes     = expected,
+            actualPhonemes       = actual,
+            matchedCount         = matched,
+            totalExpected        = expected.size,
+            accuracyPct          = accuracy,
+            perWordExpectedCounts = perWordCounts
         )
+    }
+
+    private fun enrichWordTimings(
+        timings: List<WordTiming>,
+        phraseText: String
+    ): List<WordTiming> {
+        if (timings.isEmpty()) return timings
+        val words = phraseText.trim().split("\\s+".toRegex())
+        return timings.mapIndexed { i, wt ->
+            val word = words.getOrElse(i) { wt.word }
+            wt.copy(expectedPhonemes = detector.getWordExpectedPhonemes(word))
+        }
     }
 
     // ── UI interaction ─────────────────────────────────────────────────────
@@ -276,7 +338,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         liveWaveformBuffer.clear()
         val phrase = _uiState.value.targetPhrase
         val text   = _uiState.value.customPhraseText
-        _uiState.update { MainUiState(targetPhrase = phrase, customPhraseText = text) }
+        _uiState.update { MainUiState(targetPhrase = phrase, customPhraseText = text, modelStatus = ModelStatus.READY) }
     }
 
     fun dismissError() {
