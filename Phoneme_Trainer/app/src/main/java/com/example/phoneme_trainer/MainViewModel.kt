@@ -127,6 +127,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // ── Recording control ──────────────────────────────────────────────────
 
     fun startRecording() {
+        android.util.Log.d("AudioREC", "startRecording() called — state=${_uiState.value.recordingState}, previousJob=${recordingJob}, isActive=${recordingJob?.isActive}, isCompleted=${recordingJob?.isCompleted}, isCancelled=${recordingJob?.isCancelled}")
         val ctx = getApplication<Application>()
         if (ctx.checkSelfPermission(Manifest.permission.RECORD_AUDIO)
             != PackageManager.PERMISSION_GRANTED
@@ -154,7 +155,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             )
         }
 
+        val previousJob = recordingJob
         recordingJob = viewModelScope.launch {
+            android.util.Log.d("AudioREC", "New recording coroutine started, joining previousJob=${previousJob}, isCompleted=${previousJob?.isCompleted}, isCancelled=${previousJob?.isCancelled}")
+            // Wait for the previous recording's flow to fully exit (finally block done,
+            // isRecording=false) before starting the new one, so both never run concurrently.
+            previousJob?.join()
+            android.util.Log.d("AudioREC", "previousJob?.join() returned — starting recordingFlow()")
             try {
                 recorder.recordingFlow(getApplication()).collect { chunk ->
                     val rms       = recorder.chunkRmsLevel(chunk)
@@ -184,9 +191,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun stopRecording() {
+        android.util.Log.d("AudioREC", "stopRecording() called — cancelling job=${recordingJob}")
         recorder.stop()
         recordingJob?.cancel()
-        recordingJob = null
         _uiState.update { it.copy(recordingState = RecordingState.PROCESSING, liveLevel = 0f) }
         viewModelScope.launch { analyzeRecording() }
     }
@@ -332,9 +339,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun reset() {
+        android.util.Log.d("AudioREC", "reset() called — job=${recordingJob}, isActive=${recordingJob?.isActive}, isCompleted=${recordingJob?.isCompleted}")
         recorder.stop()
         recordingJob?.cancel()
-        recordingJob = null
         liveWaveformBuffer.clear()
         val phrase = _uiState.value.targetPhrase
         val text   = _uiState.value.customPhraseText
@@ -347,7 +354,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     override fun onCleared() {
         super.onCleared()
-        recorder.stop()
+        recorder.release()
         detector.close()
     }
 }
