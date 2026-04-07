@@ -18,11 +18,12 @@ import java.nio.FloatBuffer
 import kotlin.math.exp
 
 /**
- * On-device phoneme detection using a fine-tuned Wav2Vec2 ONNX model.
+ * On-device phoneme detection using a fine-tuned WavLM ONNX model.
  *
- * The model outputs per-frame logits over 43 IPA phoneme classes.
- * CTC greedy decoding converts this to a phoneme sequence with real acoustic
- * timing and per-phoneme softmax confidence (a true acoustic posterior).
+ * The model outputs per-frame logits over 52 token classes: 26 ASCII letters (a-z) for basic phonemes
+ * and 26 IPA symbols for more complex phonetic distinctions. CTC greedy decoding converts this to
+ * a phoneme sequence (mix of ASCII and IPA) with real acoustic timing and per-phoneme softmax
+ * confidence (a true acoustic posterior).
  *
  * This replaces Vosk's word-level confidence proxy with real per-phoneme scores.
  */
@@ -33,20 +34,23 @@ class Wav2Vec2PhonemeDetector(private val context: Context) : Closeable {
         private const val MODEL_ASSET  = "wav2vec2_phoneme.onnx"
         private const val VOCAB_ASSET  = "wav2vec2_vocab.json"
         private const val SAMPLE_RATE  = AudioRecorder.SAMPLE_RATE
-        private const val PAD_TOKEN_ID = 0       // <pad> is the CTC blank token in eSpeak vocab
-        private const val MIN_CONF     = 0.08f   // eSpeak model has stronger posterior peaks
+        private const val PAD_TOKEN_ID = 0       // <pad> is the CTC blank token
+        private const val MIN_CONF     = 0.08f   // WavLM model confidence threshold
 
-        // eSpeak model special tokens to strip from decoded output
-        private val SKIP_TOKENS = setOf("<pad>", "<unk>", "|", "<s>", "</s>", "[PAD]", "[UNK]")
+        // WavLM special tokens to strip from decoded output
+        // Note: ASCII letters (a-z) are kept as they represent valid phonemes
+        private val SKIP_TOKENS = setOf(
+            "<pad>", "<unk>", "|", "<s>", "</s>", "[PAD]", "[UNK]",
+            " "  // word boundary token (not a phoneme)
+        )
 
-        // Tensor names matching Wav2Vec2OnnxWrapper in export_model.py
+        // Tensor names matching WavLMOnnxWrapper in export_model.py
         private const val INPUT_NAME  = "input_values"
-        private const val MASK_NAME   = "attention_mask"
         private const val OUTPUT_NAME = "logits"
 
         // Upload wav2vec2_phoneme.onnx to GitHub Releases and paste the URL here.
-        // Example: "https://github.com/MA0610/Elpac-training-app/releases/download/v1.0/wav2vec2_phoneme.onnx"
-        const val MODEL_DOWNLOAD_URL = "https://github.com/MA0610/Elpac-training-app/releases/download/v1.0/wav2vec2_phoneme.onnx"
+        // Example: "https://github.com/MA0610/Elpac-training-app/releases/download/v2.0/wav2vec2_phoneme.onnx"
+        const val MODEL_DOWNLOAD_URL = "https://github.com/MA0610/Elpac-training-app/releases/download/v2.0/wav2vec2_phoneme.onnx"
     }
 
     private var env: OrtEnvironment? = null
@@ -173,18 +177,11 @@ class Wav2Vec2PhonemeDetector(private val context: Context) : Closeable {
             val inputShape  = longArrayOf(1L, floats.size.toLong())
             val inputTensor = OnnxTensor.createTensor(e, FloatBuffer.wrap(floats), inputShape)
 
-            // Attention mask: all-ones (no padding)
-            val maskArr    = LongArray(floats.size) { 1L }
-            val maskTensor = OnnxTensor.createTensor(e, maskArr.let {
-                java.nio.LongBuffer.wrap(it)
-            }, inputShape)
-
-            val output  = s.run(mapOf(INPUT_NAME to inputTensor, MASK_NAME to maskTensor))
+            val output  = s.run(mapOf(INPUT_NAME to inputTensor))
             // logits shape: [1, num_frames, vocab_size]
             val logits  = output[OUTPUT_NAME].get().value as Array<Array<FloatArray>>
 
             inputTensor.close()
-            maskTensor.close()
             output.close()
 
             val frameLogits = logits[0]   // [num_frames, vocab_size]
@@ -276,7 +273,9 @@ class Wav2Vec2PhonemeDetector(private val context: Context) : Closeable {
         // Step 3: convert segments to PhonemeResult
         return segments.mapNotNull { seg ->
             val ipaSymbol = vocab[seg.tokenId] ?: return@mapNotNull null
-            if (ipaSymbol in SKIP_TOKENS) return@mapNotNull null
+            val isSkipped = ipaSymbol in SKIP_TOKENS
+            Log.d(TAG, "Token ${seg.tokenId} → '$ipaSymbol' (conf: ${"%.3f".format(seg.avgProb)}, skipped: $isSkipped)")
+            if (isSkipped) return@mapNotNull null
 
             val startMs = (seg.startFrame * msPerFrame).toLong()
             val endMs   = ((seg.endFrame * msPerFrame).toLong()).coerceAtLeast(startMs + 20L)
