@@ -3,19 +3,31 @@ package com.example.phoneme_trainer
 import android.Manifest
 import android.app.Application
 import android.content.pm.PackageManager
+import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.phoneme_trainer.audio.AudioRecorder
 import com.example.phoneme_trainer.ml.PhonemeDetector
-import com.example.phoneme_trainer.model.*
+import com.example.phoneme_trainer.model.AnalysisSession
+import com.example.phoneme_trainer.model.PhonemeComparison
+import com.example.phoneme_trainer.model.PhonemeResult
+import com.example.phoneme_trainer.model.RecordingState
+import com.example.phoneme_trainer.model.TargetPhrase
+import com.example.phoneme_trainer.model.WaveformPoint
+import com.example.phoneme_trainer.model.WordTiming
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
+
+private const val TAG = "MainVM"
 
 enum class ModelStatus { CHECKING, DOWNLOADING, READY, FAILED }
 
@@ -42,15 +54,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _uiState = MutableStateFlow(MainUiState())
     val uiState: StateFlow<MainUiState> = _uiState.asStateFlow()
 
+    // Serialises startRecording / stopRecording so a rapid tap-stop-tap sequence cannot
+    // run two recording flows concurrently. Replaces the previous "join the old job from
+    // inside the new job" pattern, which was subtle and prone to regressions.
+    private val recordingMutex = Mutex()
     private var recordingJob: Job? = null
     private var startTimeMs = 0L
     private val liveWaveformBuffer = mutableListOf<WaveformPoint>()
-    private var sampleCount = 0L
 
     init {
         viewModelScope.launch {
             try {
-                detector.prepareWav2Vec2 { progress ->
+                detector.prepareWavLM { progress ->
                     _uiState.update {
                         it.copy(
                             modelStatus = ModelStatus.DOWNLOADING,
@@ -59,7 +74,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }
                 _uiState.update { it.copy(modelStatus = ModelStatus.READY) }
+            } catch (e: SecurityException) {
+                // Hash mismatch — never auto-retry, always surface to the user.
+                Log.e(TAG, "Model verification failed", e)
+                _uiState.update {
+                    it.copy(
+                        modelStatus = ModelStatus.FAILED,
+                        errorMessage = "Model verification failed. The downloaded file did " +
+                                "not match the expected hash and will not be loaded."
+                    )
+                }
             } catch (e: Exception) {
+                Log.e(TAG, "Model download failed", e)
                 _uiState.update {
                     it.copy(
                         modelStatus = ModelStatus.FAILED,
@@ -80,8 +106,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     // ── Phrase selection ───────────────────────────────────────────────────
 
-    fun showPhraseSelector()  { _uiState.update { it.copy(showPhraseSelector = true) } }
-    fun hidePhraseSelector()  { _uiState.update { it.copy(showPhraseSelector = false) } }
+    fun showPhraseSelector() { _uiState.update { it.copy(showPhraseSelector = true) } }
+    fun hidePhraseSelector() { _uiState.update { it.copy(showPhraseSelector = false) } }
 
     fun selectPresetPhrase(phrase: TargetPhrase) {
         _uiState.update {
@@ -127,7 +153,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // ── Recording control ──────────────────────────────────────────────────
 
     fun startRecording() {
-        android.util.Log.d("AudioREC", "startRecording() called — state=${_uiState.value.recordingState}, previousJob=${recordingJob}, isActive=${recordingJob?.isActive}, isCompleted=${recordingJob?.isCompleted}, isCancelled=${recordingJob?.isCancelled}")
         val ctx = getApplication<Application>()
         if (ctx.checkSelfPermission(Manifest.permission.RECORD_AUDIO)
             != PackageManager.PERMISSION_GRANTED
@@ -139,7 +164,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (_uiState.value.modelStatus != ModelStatus.READY) return
 
         liveWaveformBuffer.clear()
-        sampleCount = 0L
         startTimeMs = System.currentTimeMillis()
 
         _uiState.update {
@@ -155,43 +179,41 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             )
         }
 
-        val previousJob = recordingJob
         recordingJob = viewModelScope.launch {
-            android.util.Log.d("AudioREC", "New recording coroutine started, joining previousJob=${previousJob}, isCompleted=${previousJob?.isCompleted}, isCancelled=${previousJob?.isCancelled}")
-            // Wait for the previous recording's flow to fully exit (finally block done,
-            // isRecording=false) before starting the new one, so both never run concurrently.
-            previousJob?.join()
-            android.util.Log.d("AudioREC", "previousJob?.join() returned — starting recordingFlow()")
-            try {
-                recorder.recordingFlow(getApplication()).collect { chunk ->
-                    val rms       = recorder.chunkRmsLevel(chunk)
-                    val timeMs    = System.currentTimeMillis() - startTimeMs
-                    val amplitude = chunk.maxOrNull()?.toFloat()?.div(Short.MAX_VALUE) ?: 0f
-                    liveWaveformBuffer.add(WaveformPoint(timeMs, amplitude))
-                    sampleCount += chunk.size
+            // Mutex guarantees the previous recording's flow has fully exited (finally
+            // block ran, isRecording=false) before this one starts, without having to
+            // join a job from inside another job.
+            recordingMutex.withLock {
+                try {
+                    recorder.recordingFlow(ctx).collect { chunk ->
+                        val rms       = recorder.chunkRmsLevel(chunk)
+                        val timeMs    = System.currentTimeMillis() - startTimeMs
+                        val amplitude = chunk.maxOrNull()?.toFloat()?.div(Short.MAX_VALUE) ?: 0f
+                        liveWaveformBuffer.add(WaveformPoint(timeMs, amplitude))
+                        _uiState.update {
+                            it.copy(
+                                liveLevel = rms,
+                                liveWaveform = liveWaveformBuffer.toList(),
+                                recordingDurationMs = timeMs
+                            )
+                        }
+                    }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Log.e(TAG, "Recording failed", e)
                     _uiState.update {
                         it.copy(
-                            liveLevel = rms,
-                            liveWaveform = liveWaveformBuffer.toList(),
-                            recordingDurationMs = timeMs
+                            recordingState = RecordingState.ERROR,
+                            errorMessage = "Recording failed: ${e.message}"
                         )
                     }
-                }
-            } catch (e: kotlinx.coroutines.CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                _uiState.update {
-                    it.copy(
-                        recordingState = RecordingState.ERROR,
-                        errorMessage = "Recording failed: ${e.message}"
-                    )
                 }
             }
         }
     }
 
     fun stopRecording() {
-        android.util.Log.d("AudioREC", "stopRecording() called — cancelling job=${recordingJob}")
         recorder.stop()
         recordingJob?.cancel()
         _uiState.update { it.copy(recordingState = RecordingState.PROCESSING, liveLevel = 0f) }
@@ -202,10 +224,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private suspend fun analyzeRecording() {
         val samples = recorder.getAllSamples()
-
-        android.util.Log.d("PhonemeDEBUG",
-            "Samples: ${samples.size}, max=${samples.maxOrNull()}, " +
-                    "nonzero=${samples.count { it != 0.toShort() }}")
 
         if (samples.size < AudioRecorder.SAMPLE_RATE / 2) {
             _uiState.update {
@@ -220,62 +238,38 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         try {
             val targetPhrase = _uiState.value.targetPhrase
 
-            // Expected phoneme sequence from CMU dict
             val expectedPhonemes: List<String> = targetPhrase?.let {
                 detector.getPhraseExpectedPhonemes(it.text)
             } ?: emptyList()
 
-            // Per-word phoneme counts from CMU dict (fixes naive even-distribution bug)
             val perWordPhonemeCount: List<Int> = targetPhrase?.let { phrase ->
                 phrase.text.trim().split("\\s+".toRegex()).map { word ->
-                    detector.getPhraseExpectedPhonemes(word).size.coerceAtLeast(1)
+                    detector.getWordExpectedPhonemes(word).size.coerceAtLeast(1)
                 }
             } ?: emptyList()
 
-            // Detection: Wav2Vec2 (primary) + Vosk word timing (for word highlighting)
-            val detectionResult = withContext(Dispatchers.Default) {
-                detector.detect(samples)
-            }
+            val detectionResult = withContext(Dispatchers.Default) { detector.detect(samples) }
             val rawPhonemes    = detectionResult.phonemes
             val nonSilPhonemes = rawPhonemes.filter { it.phoneme != "∅" }
 
-            // Enrich word timings with CMU dict expected phonemes
             val wordTimings = if (targetPhrase != null) {
                 enrichWordTimings(detectionResult.wordTimings, targetPhrase.text)
             } else detectionResult.wordTimings
 
-            android.util.Log.d("PhonemeDEBUG", "=== TARGET: ${targetPhrase?.text} ===")
-            android.util.Log.d("PhonemeDEBUG",
-                "Expected (${expectedPhonemes.size}): $expectedPhonemes")
-            android.util.Log.d("PhonemeDEBUG",
-                "Actual   (${nonSilPhonemes.size}): ${nonSilPhonemes.map { it.phoneme }}")
-            android.util.Log.d("PhonemeDEBUG",
-                "Word timings: ${wordTimings.map { "${it.word}(${it.startMs}-${it.endMs}ms)" }}")
-
-            // ── Needleman-Wunsch alignment ──
             val annotatedPhonemes = if (expectedPhonemes.isNotEmpty()) {
                 detector.alignPhonemes(nonSilPhonemes, expectedPhonemes)
             } else {
                 nonSilPhonemes
             }
 
-            // Build comparison
             val comparison = if (expectedPhonemes.isNotEmpty()) {
                 buildComparison(expectedPhonemes, annotatedPhonemes, perWordPhonemeCount)
             } else null
 
-            android.util.Log.d("PhonemeDEBUG",
-                "Matched: ${comparison?.matchedCount} / ${comparison?.totalExpected}, " +
-                        "accuracy=${comparison?.accuracyPct}")
-
-            val score = detector.computeOverallScore(annotatedPhonemes, comparison)
-
-            // ELPAC level derived from overall score
+            val score      = detector.computeOverallScore(annotatedPhonemes, comparison)
             val elpacLevel = detector.elpacLevel(score.overallScore)
-
-            val waveform = recorder.buildWaveform(samples)
-            val session  = AnalysisSession(
-                audioSamples = samples,
+            val waveform   = recorder.buildWaveform(samples)
+            val session    = AnalysisSession(
                 sampleRate   = AudioRecorder.SAMPLE_RATE,
                 phonemes     = annotatedPhonemes,
                 score        = score,
@@ -293,6 +287,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 )
             }
         } catch (e: Exception) {
+            Log.e(TAG, "Analysis failed", e)
             _uiState.update {
                 it.copy(
                     recordingState = RecordingState.ERROR,
@@ -302,20 +297,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /**
+     * Builds the [PhonemeComparison] shown to the user. The `accuracyPct` field MUST be
+     * computed via [PhonemeDetector.weightedAccuracy] so that the card's accuracy number
+     * is the same one that feeds into the top-line ELPAC score.
+     */
     private fun buildComparison(
         expected: List<String>,
         actual: List<PhonemeResult>,
         perWordCounts: List<Int> = emptyList()
     ): PhonemeComparison {
-        val matched  = actual.count { it.isCorrect }
-        val accuracy = if (expected.isEmpty()) 0f
-        else (matched.toFloat() / expected.size * 100f).coerceIn(0f, 100f)
+        val (_, total, weightedPct) = detector.weightedAccuracy(actual, expected)
+        val matched = actual.count { it.isCorrect }
         return PhonemeComparison(
-            expectedPhonemes     = expected,
-            actualPhonemes       = actual,
-            matchedCount         = matched,
-            totalExpected        = expected.size,
-            accuracyPct          = accuracy,
+            expectedPhonemes      = expected,
+            actualPhonemes        = actual,
+            matchedCount          = matched,
+            totalExpected         = total,
+            accuracyPct           = weightedPct,
             perWordExpectedCounts = perWordCounts
         )
     }
@@ -339,13 +338,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun reset() {
-        android.util.Log.d("AudioREC", "reset() called — job=${recordingJob}, isActive=${recordingJob?.isActive}, isCompleted=${recordingJob?.isCompleted}")
         recorder.stop()
         recordingJob?.cancel()
         liveWaveformBuffer.clear()
         val phrase = _uiState.value.targetPhrase
         val text   = _uiState.value.customPhraseText
-        _uiState.update { MainUiState(targetPhrase = phrase, customPhraseText = text, modelStatus = ModelStatus.READY) }
+        _uiState.update {
+            MainUiState(
+                targetPhrase = phrase,
+                customPhraseText = text,
+                modelStatus = ModelStatus.READY
+            )
+        }
     }
 
     fun dismissError() {

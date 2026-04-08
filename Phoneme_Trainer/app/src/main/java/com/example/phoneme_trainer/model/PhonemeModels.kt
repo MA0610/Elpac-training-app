@@ -48,7 +48,7 @@ data class PhonemeComparison(
 
 /**
  * Word-level timing from Vosk ASR, enriched with CMU dict expected phonemes.
- * Used to map Wav2Vec2 phonemes back to individual words for word highlighting.
+ * Used to map WavLM-detected phonemes back to individual words for word highlighting.
  */
 data class WordTiming(
     val word: String,
@@ -58,7 +58,8 @@ data class WordTiming(
 )
 
 /**
- * Combined result from the hybrid Wav2Vec2 + Vosk detection pipeline.
+ * Combined result from the hybrid WavLM + Vosk detection pipeline.
+ * WavLM produces the phoneme sequence; Vosk supplies word-boundary timings only.
  */
 data class DetectionResult(
     val phonemes: List<PhonemeResult>,
@@ -74,34 +75,20 @@ data class WaveformPoint(
     val amplitude: Float
 )
 
+/**
+ * The raw PCM buffer is intentionally NOT held in UI state — a 30 s recording is ~1 MB
+ * and would be retained across every Compose recomposition. The waveform field holds a
+ * 300-point downsampled representation that is sufficient for visualisation.
+ */
 data class AnalysisSession(
-    val audioSamples: ShortArray,
     val sampleRate: Int,
     val phonemes: List<PhonemeResult>,
     val score: PronunciationScore,
     val waveform: List<WaveformPoint>,
     val targetPhrase: TargetPhrase? = null,
     val comparison: PhonemeComparison? = null,
-    val wordTimings: List<WordTiming> = emptyList()  // for word-level feedback
-) {
-    override fun equals(other: Any?): Boolean {
-        if (this === other) return true
-        if (other !is AnalysisSession) return false
-        return sampleRate == other.sampleRate &&
-                audioSamples.contentEquals(other.audioSamples) &&
-                phonemes == other.phonemes &&
-                score == other.score &&
-                waveform == other.waveform
-    }
-    override fun hashCode(): Int {
-        var result = audioSamples.contentHashCode()
-        result = 31 * result + sampleRate
-        result = 31 * result + phonemes.hashCode()
-        result = 31 * result + score.hashCode()
-        result = 31 * result + waveform.hashCode()
-        return result
-    }
-}
+    val wordTimings: List<WordTiming> = emptyList()
+)
 
 data class PhonemeInfo(
     val symbol: String,
@@ -116,8 +103,10 @@ enum class PhonemeCategory {
 
 object PhonemeInventory {
 
-    // ARPABET → IPA using eSpeak-compatible long vowel forms so that CMU dict
-    // expected phonemes align exactly with facebook/wav2vec2-lv-60-espeak-cv-ft output.
+    // ARPABET → IPA using long-vowel forms so that CMU dict expected phonemes align
+    // with the WavLM model's output. The WavLM checkpoint emits short vowel tokens
+    // plus a standalone "ː" length mark, which the CTC decoder (WavLMPhonemeDetector)
+    // merges into long-vowel forms before alignment.
     val ARPABET_TO_IPA = mapOf(
         "AA" to "ɑː", "AE" to "æ",  "AH" to "ʌ",  "AO" to "ɔː",
         "AW" to "aʊ", "AY" to "aɪ", "B"  to "b",   "CH" to "tʃ",
@@ -163,7 +152,7 @@ object PhonemeInventory {
         "ɔɪ" to PhonemeInfo("ɔɪ", "boy",       PhonemeCategory.VOWEL),
         "ʊ"  to PhonemeInfo("ʊ",  "book",      PhonemeCategory.VOWEL),
         "uː" to PhonemeInfo("uː", "food",      PhonemeCategory.VOWEL),
-        // eSpeak long vowel forms (primary output of wav2vec2-lv-60-espeak-cv-ft)
+        // Long-vowel forms (reconstructed by the CTC decoder via length-mark merging)
         "ɑː" to PhonemeInfo("ɑː", "father",    PhonemeCategory.VOWEL),
         "ɔː" to PhonemeInfo("ɔː", "thought",   PhonemeCategory.VOWEL),
         "ɜː" to PhonemeInfo("ɜː", "bird",      PhonemeCategory.VOWEL),
