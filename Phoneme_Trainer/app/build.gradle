@@ -14,7 +14,9 @@ android {
         versionName "1.0"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
 
-
+        // WavLM model — empty SHA-256 disables verification (debug only)
+        buildConfigField "String", "WAVLM_MODEL_URL",    "\"https://github.com/MA0610/Elpac-training-app/releases/download/v2.0/wavlm_phoneme.onnx\""
+        buildConfigField "String", "WAVLM_MODEL_SHA256", "\"00f3d3af636bce5f05962c49829d570b5313f130d6f5eac2a7540a992882a16b\""
     }
 
     kotlin {
@@ -37,6 +39,7 @@ android {
 
     buildFeatures {
         compose true
+        buildConfig true
     }
 
 
@@ -84,7 +87,7 @@ dependencies {
 
     implementation 'com.alphacephei:vosk-android:0.3.47'
 
-    // ONNX Runtime for Wav2Vec2 phoneme model (1.19+ required for ONNX IR version 10)
+    // ONNX Runtime for WavLM phoneme model (1.20.0+ required for ONNX IR version 10)
     implementation 'com.microsoft.onnxruntime:onnxruntime-android:1.20.0'
 
 }
