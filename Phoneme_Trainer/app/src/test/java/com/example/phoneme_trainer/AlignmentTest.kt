@@ -27,7 +27,7 @@ class AlignmentTest {
         setOf("u", "uː"), setOf("ɝ", "ɜː")
     )
 
-    private fun isNearMiss(a: String, b: String) = SIMILAR_PAIRS.any { it.contains(a) && it.contains(b) }
+    private fun isNearMiss(a: String, b: String) = a != b && SIMILAR_PAIRS.any { it.contains(a) && it.contains(b) }
 
     private fun sim(a: String, e: String): Int = when {
         a == e           -> MATCH

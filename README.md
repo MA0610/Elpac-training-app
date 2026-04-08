@@ -5,7 +5,7 @@ An Android app for on-device pronunciation analysis targeting the **ELPAC** (Eng
 ## Features
 
 - Record live speech or upload a WAV file for analysis
-- AI-powered phoneme detection using a fine-tuned **WavLM** (Microsoft, ~310 M params) CTC head producing ~52 IPA-like tokens
+- AI-powered phoneme detection using a fine-tuned **WavLM-base** (Microsoft, ~94 M params) CTC head producing ~52 IPA-like tokens
 - Phoneme alignment against 140K+ words via the CMU Pronouncing Dictionary
 - ELPAC rubric (Levels 1–4) with accuracy, fluency and completeness sub-scores
 - 22 preset ELPAC-aligned target phrases, plus custom phrase input
@@ -71,8 +71,8 @@ The traceback annotates each detected phoneme with `isCorrect` and `expectedPhon
 | Component | Weight | How computed |
 |---|---|---|
 | Accuracy | 55% | Weighted match rate over expected phonemes. `exact=1.00`, `near-miss=0.70`, `insertion=0.00`, `wrong/missing=0.00` |
-| Fluency | 30% | `100 − gap_penalty`, floored at 30. Penalty: 8 per hesitation (gap > 300 ms), 5 per overlap (gap < −10 ms), capped at 40 |
-| Completeness | 15% | Fraction of expected phonemes that were produced (had a non-null `expectedPhoneme`) |
+| Fluency | 30% | `100 − gap_penalty`, floored at 30. Gaps measured between **words** (Vosk timings); falls back to inter-phoneme gaps only when no word timings exist. Penalty: 8 per hesitation (gap > 300 ms), 5 per overlap (gap < −10 ms), capped at 40. Returns 50 when fewer than 2 phonemes detected. |
+| Completeness | 15% | Fraction of expected phonemes **correctly produced** (`isCorrect = true`; exact matches and near-misses only — substitutions do not count) |
 | **Overall** | — | `0.55·accuracy + 0.30·fluency + 0.15·completeness`, clamped to `[0, 100]` |
 
 In free-form mode (no target phrase) accuracy degenerates to the mean acoustic posterior.
@@ -187,3 +187,4 @@ Never call `AudioRecord.stop()` between recording sessions on the emulator — t
 
 - [ ] **Calibrate the placeholders.** `MIN_POSTERIOR = 0.08`, the three component weights (0.55 / 0.30 / 0.15), and the ELPAC threshold table are all placeholder defaults. They need to be re-tuned on a held-out dev set against expert ratings before any published score is meaningful (see `docs/SCORING.md`)
 - [ ] **Consider swapping the hand-tuned near-miss set** for a distinctive-feature distance (e.g. PanPhon) so partial-credit decisions are principled rather than enumerated
+- [ ] **Model re-export for reproducibility.** The updated `export_model.py` now exports from the local `age aware base +` checkpoint (not `facebook/wav2vec2-lv-60-espeak-cv-ft`). Re-run it and upload a new release if you need a clean reproducible artifact for the paper.

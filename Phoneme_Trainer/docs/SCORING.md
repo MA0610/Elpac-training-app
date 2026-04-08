@@ -85,16 +85,16 @@ Constants:
 
 | Constant | Value | Meaning |
 |---|---|---|
-| `HESITATION_GAP_MS` | 300 ms | Inter-phoneme gap longer than this is counted as a hesitation |
+| `HESITATION_GAP_MS` | 300 ms | Inter-word gap longer than this is counted as a hesitation |
 | `OVERLAP_GAP_MS` | −10 ms | Negative gap larger in magnitude than this is counted as a rush/overlap |
 | `PENALTY_PER_HESITATION` | 8 pts | Deducted per hesitation |
 | `PENALTY_PER_OVERLAP` | 5 pts | Deducted per overlap |
 | `MAX_GAP_PENALTY` | 40 pts | Cap on total gap penalty |
 | `MIN_FLUENCY_FLOOR` | 30 pts | Minimum fluency score (prevents zero) |
 
-The 300 ms hesitation threshold is consistent with typical pause-duration distributions in fluent L2 English speech. These values are empirical defaults and should be re-calibrated on a representative corpus.
+Gaps are measured between **words** (using Vosk `WordTiming` start/end boundaries) when ≥2 words are detected. Inter-word measurement avoids penalising normal consonant clusters and coarticulation as rushes. The phoneme-level gap measurement is used only as a fallback when no word timings are available. The 300 ms threshold is consistent with typical pause-duration distributions in fluent L2 English speech (Kormos 2006; Cucchiarini et al. 2002). Values should be re-calibrated on a representative corpus.
 
-When fewer than two non-silence phonemes are detected, fluency falls back to `accuracy × 0.9` (no inter-phoneme gaps to measure).
+When fewer than two non-silence phonemes are detected, fluency returns a fixed mid-range constant of `50` (no gaps to measure; the two dimensions are intentionally kept independent).
 
 ---
 
@@ -104,7 +104,7 @@ When fewer than two non-silence phonemes are detected, fluency falls back to `ac
 completeness = produced / totalExpected × 100
 ```
 
-`produced` = number of detected phonemes that have a non-null `expectedPhoneme` (i.e., were aligned to something in the reference sequence — exact, near-miss, or substitution).
+`produced` = number of detected phonemes where `isCorrect = true` (exact matches and near-misses only). Substitutions are **not** counted — a learner who substitutes every phoneme receives 0% completeness, not 100%. This requires that phonemes be passed through `alignPhonemes()` before scoring.
 
 In free-form mode (no target phrase), completeness falls back to `min(phoneme_count / 5, 1) × 100` — a rough proxy for utterance length relative to a 5-phoneme baseline.
 
@@ -135,6 +135,8 @@ Global alignment of detected IPA against expected IPA. DP scores:
 | Gap (insertion or deletion) | −1 |
 
 The traceback produces an `expectedPhoneme` annotation on each detected phoneme. Deletions (expected phoneme with no detected counterpart) do not appear in the output list — they reduce `totalExpected` indirectly via the `PhonemeComparison.totalExpected` field.
+
+**Tie-breaking convention:** When two or more traceback moves yield an equal DP score (e.g., diagonal match vs. a gap), the diagonal (match/mismatch) is always preferred over a gap move. This is the standard greedy convention but it is not the only valid choice — preferring gaps in ties would produce different per-phoneme error counts on ambiguous alignments. Results in the paper were produced with the diagonal-first convention.
 
 ---
 

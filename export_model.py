@@ -1,16 +1,23 @@
 """
-Export facebook/wav2vec2-lv-60-espeak-cv-ft to ONNX for Android.
+Export the local 'age aware base +' WavLM-CTC checkpoint to ONNX for Android.
 
-Run once before uploading to GitHub Releases:
-    pip install transformers torch
+Requirements:
+    pip install transformers torch onnx
+
+Usage:
     python export_model.py
 
-Outputs:
-    wav2vec2_phoneme.onnx   (~380 MB float32)
-    wav2vec2_vocab.json     (token_id → IPA symbol)
+The checkpoint directory './age aware base +/' must exist in the repo root.
+This is the WavLM-base model fine-tuned with a CTC head (~94 M parameters).
 
-Then upload wav2vec2_phoneme.onnx to:
-    https://github.com/MA0610/Vosk_Elpac/releases/new  (tag: v1.0)
+Outputs:
+    wavlm_phoneme.onnx   (~360 MB float32, single self-contained file)
+    wavlm_vocab.json     (token_id → IPA symbol, copy to app/src/main/assets/)
+
+After export:
+    1. Copy wavlm_vocab.json to app/src/main/assets/wavlm_vocab.json
+    2. Upload wavlm_phoneme.onnx to GitHub Releases (tag: v2.0)
+    3. Update WAVLM_MODEL_URL and WAVLM_MODEL_SHA256 in app/build.gradle
 """
 
 import json
@@ -18,37 +25,42 @@ import os
 import torch
 from transformers import Wav2Vec2ForCTC, Wav2Vec2CTCTokenizer
 
-MODEL_ID = "facebook/wav2vec2-lv-60-espeak-cv-ft"
-OUT_ONNX  = "wav2vec2_phoneme.onnx"
-OUT_VOCAB = "wav2vec2_vocab.json"
+CHECKPOINT_DIR = "./age aware base +/"
+OUT_ONNX  = "wavlm_phoneme.onnx"
+OUT_VOCAB = "wavlm_vocab.json"
 
-# ── 1. Load model ─────────────────────────────────────────────────────────────
-print(f"Loading {MODEL_ID}...")
-tokenizer = Wav2Vec2CTCTokenizer.from_pretrained(MODEL_ID)
-model     = Wav2Vec2ForCTC.from_pretrained(MODEL_ID, torch_dtype=torch.float32)
+# ── 1. Load model from local checkpoint ───────────────────────────────────────
+print(f"Loading checkpoint from {CHECKPOINT_DIR!r}...")
+if not os.path.isdir(CHECKPOINT_DIR):
+    raise FileNotFoundError(
+        f"Checkpoint directory not found: {CHECKPOINT_DIR!r}\n"
+        "Ensure the 'age aware base +' directory is present in the repo root."
+    )
+
+tokenizer = Wav2Vec2CTCTokenizer.from_pretrained(CHECKPOINT_DIR)
+model     = Wav2Vec2ForCTC.from_pretrained(CHECKPOINT_DIR, torch_dtype=torch.float32)
 model.eval()
 
 n_params = sum(p.numel() for p in model.parameters())
-print(f"Model parameters: {n_params / 1e6:.0f} M  (expect ~300 M for wav2vec2-large)")
+print(f"Model parameters: {n_params / 1e6:.0f} M  (WavLM-base + CTC head, expect ~94 M)")
 
 # ── 2. Wrapper that returns only logits (required for ONNX traceability) ──────
-class Wav2Vec2OnnxWrapper(torch.nn.Module):
+class WavLMOnnxWrapper(torch.nn.Module):
     def __init__(self, m):
         super().__init__()
         self.m = m
 
-    def forward(self, input_values: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
-        return self.m(input_values=input_values, attention_mask=attention_mask).logits
+    def forward(self, input_values: torch.Tensor) -> torch.Tensor:
+        return self.m(input_values=input_values).logits
 
-wrapper = Wav2Vec2OnnxWrapper(model)
+wrapper = WavLMOnnxWrapper(model)
 
-# Dummy inputs: 1-second batch
+# Dummy input: 1-second batch at 16 kHz
 dummy_audio = torch.randn(1, 16000)
-dummy_mask  = torch.ones(1, 16000, dtype=torch.long)
 
 # Sanity-check: verify the model actually runs
 with torch.no_grad():
-    logits = wrapper(dummy_audio, dummy_mask)
+    logits = wrapper(dummy_audio)
 print(f"Sanity check — logits shape: {logits.shape}  (expect [1, ~49, vocab_size])")
 if logits.shape[-1] < 10:
     raise RuntimeError("Logits vocab dimension is too small — model may not have loaded correctly.")
@@ -58,29 +70,25 @@ print(f"Exporting to {OUT_ONNX}  (this may take a few minutes)...")
 with torch.no_grad():
     torch.onnx.export(
         wrapper,
-        (dummy_audio, dummy_mask),
+        (dummy_audio,),
         OUT_ONNX,
-        input_names=["input_values", "attention_mask"],
+        input_names=["input_values"],
         output_names=["logits"],
         dynamic_axes={
-            "input_values":   {0: "batch", 1: "sequence"},
-            "attention_mask": {0: "batch", 1: "sequence"},
-            "logits":         {0: "batch", 1: "frames"},
+            "input_values": {0: "batch", 1: "sequence"},
+            "logits":       {0: "batch", 1: "frames"},
         },
         opset_version=14,
         do_constant_folding=False,
     )
 
 # ── 3b. Merge external data into a single self-contained ONNX file ────────────
-# Large models split into .onnx + .onnx.data — merge so only one file needs uploading.
 data_file = OUT_ONNX + ".data"
 if os.path.exists(data_file):
     print("Merging external data into single file...")
     import onnx
-    from onnx.external_data_helper import convert_model_to_external_data, load_external_data_for_model
     merged_model = onnx.load(OUT_ONNX, load_external_data=True)
-    onnx.save(merged_model, OUT_ONNX,
-              save_as_external_data=False)   # inline all tensors
+    onnx.save(merged_model, OUT_ONNX, save_as_external_data=False)
     os.remove(data_file)
     print("Merged — .data file removed.")
 
@@ -89,7 +97,7 @@ print(f"Saved: {OUT_ONNX}  ({size_mb:.0f} MB)")
 if size_mb < 100:
     print("WARNING: file is unexpectedly small — model may not have exported correctly.")
 else:
-    print("✅ Size looks correct.")
+    print("Size looks correct.")
 
 # ── 4. Export vocab ───────────────────────────────────────────────────────────
 vocab = {int(v): k for k, v in tokenizer.get_vocab().items()}
@@ -99,6 +107,7 @@ print(f"Saved: {OUT_VOCAB}  ({len(vocab)} tokens)")
 
 print()
 print("Next steps:")
-print(f"  1. Upload {OUT_ONNX} to https://github.com/MA0610/Vosk_Elpac/releases/new (tag: v1.0)")
-print(f"  2. Copy {OUT_VOCAB} to Vosk_Elpac/app/src/main/assets/wav2vec2_vocab.json")
-print("  3. ./gradlew assembleDebug && adb install ...")
+print(f"  1. Copy {OUT_VOCAB} to app/src/main/assets/wavlm_vocab.json")
+print(f"  2. Upload {OUT_ONNX} to GitHub Releases (tag: v2.0)")
+print("  3. Update WAVLM_MODEL_URL and WAVLM_MODEL_SHA256 in app/build.gradle")
+print("  4. ./gradlew assembleDebug && adb install ...")

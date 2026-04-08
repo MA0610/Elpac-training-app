@@ -106,7 +106,7 @@ class PhonemeDetector(private val context: Context) {
         )
 
         private fun isNearMiss(a: String, b: String): Boolean =
-            SIMILAR_PAIRS.any { it.contains(a) && it.contains(b) }
+            a != b && SIMILAR_PAIRS.any { it.contains(a) && it.contains(b) }
     }
 
     // ── Models ───────────────────────────────────────────────────────────────
@@ -391,14 +391,15 @@ class PhonemeDetector(private val context: Context) {
      */
     fun computeOverallScore(
         phonemes: List<PhonemeResult>,
-        comparison: PhonemeComparison? = null
+        comparison: PhonemeComparison? = null,
+        wordTimings: List<WordTiming> = emptyList()
     ): PronunciationScore {
         if (phonemes.isEmpty()) return PronunciationScore(0f, 0f, 0f, 0f, emptyList())
         val nonSil = phonemes.filter { it.phoneme != "∅" }
-        if (nonSil.isEmpty()) return PronunciationScore(0f, 0f, 0f, 0f, phonemes)
+        if (nonSil.isEmpty()) return PronunciationScore(0f, 0f, MIN_FLUENCY_FLOOR, 0f, phonemes)
 
         val accuracy     = computeAccuracy(nonSil, comparison)
-        val fluency      = computeFluency(nonSil, accuracy)
+        val fluency      = computeFluency(nonSil, accuracy, wordTimings)
         val completeness = computeCompleteness(nonSil, comparison)
 
         val overall = (accuracy     * W_ACCURACY +
@@ -438,9 +439,13 @@ class PhonemeDetector(private val context: Context) {
         return ((weighted / totalExpected) * 100.0).toFloat().coerceIn(0f, 100f)
     }
 
-    private fun computeFluency(nonSil: List<PhonemeResult>, accuracy: Float): Float {
-        if (nonSil.size < 2) return accuracy * 0.9f
-        val gaps = nonSil.zipWithNext { a, b -> b.startTimeMs - a.endTimeMs }
+    private fun computeFluency(nonSil: List<PhonemeResult>, accuracy: Float, wordTimings: List<WordTiming> = emptyList()): Float {
+        if (nonSil.size < 2) return 50f
+        val gaps: List<Long> = if (wordTimings.size >= 2) {
+            wordTimings.zipWithNext { a, b -> b.startMs - a.endMs }
+        } else {
+            nonSil.zipWithNext { a, b -> b.startTimeMs - a.endTimeMs }
+        }
         val hesitations = gaps.count { it > HESITATION_GAP_MS }
         val rushes      = gaps.count { it < OVERLAP_GAP_MS }
         val penalty = (hesitations * PENALTY_PER_HESITATION +
@@ -457,7 +462,7 @@ class PhonemeDetector(private val context: Context) {
             return min(100f, nonSil.size.toFloat() / 5f * 100f)
         }
         val expected = comparison.totalExpected.toFloat().coerceAtLeast(1f)
-        val produced = nonSil.count { it.expectedPhoneme != null }.toFloat()
+        val produced = nonSil.count { it.isCorrect }.toFloat()
         return (produced / expected * 100f).coerceIn(0f, 100f)
     }
 

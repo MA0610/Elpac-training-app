@@ -339,7 +339,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
             val perWordPhonemeCount: List<Int> = targetPhrase?.let { phrase ->
                 phrase.text.trim().split("\\s+".toRegex()).map { word ->
-                    detector.getWordExpectedPhonemes(word).size.coerceAtLeast(1)
+                    detector.getWordExpectedPhonemes(word).size
                 }
             } ?: emptyList()
 
@@ -361,7 +361,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 buildComparison(expectedPhonemes, annotatedPhonemes, perWordPhonemeCount)
             } else null
 
-            val score      = detector.computeOverallScore(annotatedPhonemes, comparison)
+            val score      = detector.computeOverallScore(annotatedPhonemes, comparison, wordTimings)
             val elpacLevel = detector.elpacLevel(score.overallScore)
             val waveform   = recorder.buildWaveform(samples)
             val session    = AnalysisSession(

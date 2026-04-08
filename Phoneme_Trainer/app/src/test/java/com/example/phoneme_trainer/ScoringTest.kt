@@ -50,7 +50,7 @@ class ScoringTest {
 
     // ── Helpers ──────────────────────────────────────────────────────────────
 
-    private fun isNearMiss(a: String, b: String) = SIMILAR_PAIRS.any { it.contains(a) && it.contains(b) }
+    private fun isNearMiss(a: String, b: String) = a != b && SIMILAR_PAIRS.any { it.contains(a) && it.contains(b) }
 
     private fun weightedAccuracy(actual: List<PhonemeResult>, totalExpected: Int): Float {
         if (totalExpected == 0) return 0f
@@ -67,7 +67,7 @@ class ScoringTest {
     }
 
     private fun fluency(phonemes: List<PhonemeResult>): Float {
-        if (phonemes.size < 2) return 100f
+        if (phonemes.size < 2) return 50f
         val gaps = phonemes.zipWithNext { a, b -> b.startTimeMs - a.endTimeMs }
         val hesitations = gaps.count { it > HESITATION_GAP_MS }
         val rushes = gaps.count { it < OVERLAP_GAP_MS }
@@ -192,8 +192,8 @@ class ScoringTest {
     }
 
     @Test
-    fun `single phoneme gives 100 fluency (no gaps to measure)`() {
-        assertEquals(100f, fluency(listOf(ph("t", "t", 0L, 80L))), 0.01f)
+    fun `single phoneme gives 50 fluency (fixed fallback, no gaps to measure)`() {
+        assertEquals(50f, fluency(listOf(ph("t", "t", 0L, 80L))), 0.01f)
     }
 
     @Test
