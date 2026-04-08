@@ -185,9 +185,5 @@ Never call `AudioRecord.stop()` between recording sessions on the emulator — t
 
 ## What Still Needs to Be Done
 
-- [ ] **Upload `wavlm_phoneme.onnx` to GitHub Releases** (tag `v2.0`) so the auto-download path works on fresh installs. The URL and SHA-256 hash are already pinned in `app/build.gradle`; the file just needs to be pushed to the release
-- [ ] **Create `docs/SCORING.md`.** `PhonemeDetector.kt` cites it for per-class weight justification and fluency-threshold citations, but the file does not exist
-- [ ] **Calibrate the placeholders.** `MIN_POSTERIOR = 0.08`, the three component weights (0.55 / 0.30 / 0.15), and the ELPAC threshold table are all placeholder defaults. They need to be re-tuned on a held-out dev set against expert ratings before any published score is meaningful
-- [ ] **Unit tests.** The `test` source set currently only depends on JUnit with nothing in it. Candidates for coverage: CTC decode + length-mark merge on synthetic logits, Needleman-Wunsch on tiny hand-written sequences, `weightedAccuracy` edge cases (empty expected, all insertions, all near-misses), CMU-dict lookup for OOV words
+- [ ] **Calibrate the placeholders.** `MIN_POSTERIOR = 0.08`, the three component weights (0.55 / 0.30 / 0.15), and the ELPAC threshold table are all placeholder defaults. They need to be re-tuned on a held-out dev set against expert ratings before any published score is meaningful (see `docs/SCORING.md`)
 - [ ] **Consider swapping the hand-tuned near-miss set** for a distinctive-feature distance (e.g. PanPhon) so partial-credit decisions are principled rather than enumerated
-- [ ] **Legacy filename clean-up.** The remote download filename still uses the `wav2vec2_` prefix for v2.0-release compatibility. Once v2.0 is retired, the one-time migration in `downloadAndInit()` can go away

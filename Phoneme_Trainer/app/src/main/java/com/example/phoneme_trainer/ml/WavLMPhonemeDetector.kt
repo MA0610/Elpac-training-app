@@ -38,17 +38,13 @@ import kotlin.math.ln
  *     session is initialised. A mismatch aborts loading rather than executing an
  *     attacker-controlled graph.
  *
- * Legacy note: remote and asset file names retain the "wav2vec2_" prefix for backward
- * compatibility with the v2.0 GitHub release. The class name and API use "WavLM" which
- * is the correct architecture.
  */
 class WavLMPhonemeDetector(private val context: Context) : Closeable {
 
     companion object {
-        private const val TAG              = "WavLMDetector"
-        private const val MODEL_FILE_NAME  = "wavlm_phoneme.onnx"
-        private const val LEGACY_FILE_NAME = "wav2vec2_phoneme.onnx"  // renamed on first run
-        private const val VOCAB_ASSET      = "wavlm_vocab.json"
+        private const val TAG             = "WavLMDetector"
+        private const val MODEL_FILE_NAME = "wavlm_phoneme.onnx"
+        private const val VOCAB_ASSET     = "wavlm_vocab.json"
         private const val SAMPLE_RATE      = AudioRecorder.SAMPLE_RATE
 
         // Special token ids. PAD (CTC blank) is id 0 per the exported vocab.
@@ -82,10 +78,6 @@ class WavLMPhonemeDetector(private val context: Context) : Closeable {
          */
         val MODEL_SHA256: String = BuildConfig.WAVLM_MODEL_SHA256
 
-        /**
-         * Public download URL for the ONNX weights. The remote file name still reflects the
-         * old "wav2vec2_" naming because it corresponds to the v2.0 release asset.
-         */
         val MODEL_DOWNLOAD_URL: String = BuildConfig.WAVLM_MODEL_URL
     }
 
@@ -130,15 +122,6 @@ class WavLMPhonemeDetector(private val context: Context) : Closeable {
         if (isAvailable) { onProgress(1f); return }
         val modelFile = File(context.filesDir, MODEL_FILE_NAME)
         withContext(Dispatchers.IO) {
-            // One-time migration: rename the legacy file if it exists, so users who
-            // installed prior builds do not have to re-download.
-            val legacy = File(context.filesDir, LEGACY_FILE_NAME)
-            if (legacy.exists() && !modelFile.exists()) {
-                if (legacy.renameTo(modelFile)) {
-                    if (BuildConfig.DEBUG) Log.i(TAG, "Migrated $LEGACY_FILE_NAME → $MODEL_FILE_NAME")
-                }
-            }
-
             if (!modelFile.exists() || modelFile.length() <= 1_000_000L) {
                 downloadModel(modelFile, onProgress)
             }
