@@ -1,5 +1,7 @@
 package com.example.phoneme_trainer
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.*
@@ -36,6 +38,9 @@ import kotlin.math.roundToInt
 @Composable
 fun MainScreen(viewModel: MainViewModel) {
     val uiState by viewModel.uiState.collectAsState()
+    val fileLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.GetContent()
+    ) { uri -> uri?.let { viewModel.analyzeFromFile(it) } }
 
     Box(
         modifier = Modifier
@@ -87,12 +92,32 @@ fun MainScreen(viewModel: MainViewModel) {
             // ── Waveform ───────────────────────────────────────────────────
             WaveformSection(uiState)
 
-            // ── Record button ──────────────────────────────────────────────
-            RecordButton(
-                state = uiState.recordingState,
-                onStart = viewModel::startRecording,
-                onStop = viewModel::stopRecording
-            )
+            // ── Record button + file upload ────────────────────────────────
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                RecordButton(
+                    state = uiState.recordingState,
+                    onStart = viewModel::startRecording,
+                    onStop = viewModel::stopRecording
+                )
+                AnimatedVisibility(
+                    uiState.recordingState == RecordingState.IDLE ||
+                    uiState.recordingState == RecordingState.DONE
+                ) {
+                    TextButton(onClick = { fileLauncher.launch("audio/*") }) {
+                        Icon(
+                            Icons.Default.FileUpload,
+                            contentDescription = "Upload audio file",
+                            modifier = Modifier.size(16.dp),
+                            tint = Color(0xFF9E9E9E)
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Text("Upload audio file", color = Color(0xFF9E9E9E), fontSize = 13.sp)
+                    }
+                }
+            }
 
             // ── Live level meter ───────────────────────────────────────────
             AnimatedVisibility(uiState.recordingState == RecordingState.RECORDING) {
