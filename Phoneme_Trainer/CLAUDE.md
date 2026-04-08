@@ -22,7 +22,10 @@ ELPAC Training App is an Android app for real-time pronunciation analysis target
 ### Key Components
 
 **`MainViewModel.kt`** — Central orchestrator using StateFlow/coroutines:
-- Recording workflow: `startRecording()` → `stopRecording()` → `analyzeRecording()`
+- Recording workflow: `startRecording()` → `stopRecording()` → `analyzeRecording(ShortArray)`
+- File upload workflow: `analyzeFromFile(Uri)` → `readWavSamples(Uri)` → `analyzeRecording(ShortArray)`
+- Both paths converge at `analyzeRecording(ShortArray)` — the same analysis pipeline runs for both
+- WAV parsing in `readWavSamples()`: scans RIFF/WAVE chunks, validates PCM mono 16kHz 16-bit, returns `ShortArray`
 - Analysis pipeline: CMU dict lookup → WavLM phoneme detection → Needleman-Wunsch alignment → score computation → ELPAC level mapping
 - Model download state machine: `CHECKING → DOWNLOADING → READY | FAILED`
 
@@ -50,11 +53,22 @@ ELPAC Training App is an Android app for real-time pronunciation analysis target
 
 ### Data Flow
 
+Two entry points, one pipeline:
+
+**Live recording:**
 1. `AudioRecorder` emits PCM chunks → `MainViewModel` accumulates samples + updates live waveform/level meter
-2. On stop: `WavLMPhonemeDetector.detectPhonemes()` runs ONNX inference → CTC decode + length-mark merge → IPA phonemes with timing
-3. Vosk extracts word-boundary timings (used for word-level UI only)
-4. `PhonemeDetector.alignPhonemes()` runs Needleman-Wunsch against CMU dict expected phonemes
-5. Results flow back as `AnalysisSession` → `MainUiState` StateFlow → Compose UI recomposes
+2. `stopRecording()` calls `recorder.getAllSamples()` → passes `ShortArray` to `analyzeRecording()`
+
+**File upload:**
+1. User picks a WAV via system file picker → `analyzeFromFile(uri)` dispatches to IO thread
+2. `readWavSamples(uri)` opens the content URI, parses RIFF/WAVE header, validates format, returns `ShortArray`
+3. Same `ShortArray` passed to `analyzeRecording()`
+
+**Shared analysis (both paths):**
+3. `WavLMPhonemeDetector.detectPhonemes()` runs ONNX inference → CTC decode + length-mark merge → IPA phonemes with timing
+4. Vosk extracts word-boundary timings (used for word-level UI only)
+5. `PhonemeDetector.alignPhonemes()` runs Needleman-Wunsch against CMU dict expected phonemes
+6. Results flow back as `AnalysisSession` → `MainUiState` StateFlow → Compose UI recomposes
 
 ### State Model
 

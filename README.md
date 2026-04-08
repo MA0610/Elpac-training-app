@@ -4,7 +4,7 @@ An Android app for on-device pronunciation analysis targeting the **ELPAC** (Eng
 
 ## Features
 
-- Record speech and receive instant phoneme-level feedback
+- Record live speech or upload a WAV file for analysis
 - AI-powered phoneme detection using a fine-tuned **WavLM** (Microsoft, ~310 M params) CTC head producing ~52 IPA-like tokens
 - Phoneme alignment against 140K+ words via the CMU Pronouncing Dictionary
 - ELPAC rubric (Levels 1–4) with accuracy, fluency and completeness sub-scores
@@ -16,9 +16,13 @@ An Android app for on-device pronunciation analysis targeting the **ELPAC** (Eng
 
 ## How It Works
 
-### Recording
+### Audio Input
 
-Speech is captured via Android `AudioRecord` at **16 kHz mono, 16-bit PCM**. Samples stream in 100 ms chunks via a Kotlin `Flow` while a live waveform and level meter update in real time. A persistent `AudioRecord` instance is reused across sessions to avoid the emulator falling back to its synthetic tone source when `stop()` is called between recordings.
+The app accepts audio from two sources, both feeding the same analysis pipeline:
+
+**Live recording** — Speech is captured via Android `AudioRecord` at **16 kHz mono, 16-bit PCM**. Samples stream in 100 ms chunks via a Kotlin `Flow` while a live waveform and level meter update in real time. A persistent `AudioRecord` instance is reused across sessions to avoid the emulator falling back to its synthetic tone source when `stop()` is called between recordings.
+
+**WAV file upload** — Tap "Upload audio file" (visible in IDLE and DONE states) to pick any WAV file from the device. `MainViewModel.readWavSamples()` parses the RIFF/WAVE header, scans for `fmt ` and `data` chunks, and validates the format before reading. Accepted format: **uncompressed PCM, mono, 16 kHz, 16-bit**. Files that don't match produce a clear error message. The resulting `ShortArray` is handed directly to `analyzeRecording()` — identical to what the live recorder produces.
 
 ### Phoneme Detection (WavLM-for-CTC)
 
@@ -134,26 +138,28 @@ Open the `Phoneme_Trainer/` folder in Android Studio, sync Gradle, and run on a 
 ## Architecture
 
 ```
-AudioRecorder (16 kHz PCM, 100 ms chunks via Flow)
-    └─> MainViewModel  (StateFlow<MainUiState>, recording mutex)
-            ├─> PhonemeDetector
-            │       ├─> WavLMPhonemeDetector  — ONNX inference, CTC decode,
-            │       │                            length-mark merge, posterior threshold
-            │       ├─> Vosk (vosk-model-small-en-us-0.15)  — word-boundary timing only
-            │       ├─> CMU Pronouncing Dictionary (cmudict-0.7b)
-            │       ├─> Needleman-Wunsch alignment
-            │       └─> Weighted accuracy / fluency / completeness → ELPAC level
-            └─> MainScreen (Compose)
-                    ├─> Waveform + level meter
-                    ├─> PhonemeTimeline + ScoreRings
-                    └─> TranscriptFeedbackSection  (word + phoneme feedback)
+AudioRecorder (16 kHz PCM, 100 ms chunks via Flow)  ──┐
+WAV file upload (Uri → readWavSamples())             ──┤
+                                                       ▼
+                                    MainViewModel  (StateFlow<MainUiState>)
+                                            ├─> PhonemeDetector
+                                            │       ├─> WavLMPhonemeDetector  — ONNX inference, CTC decode,
+                                            │       │                            length-mark merge, posterior threshold
+                                            │       ├─> Vosk (vosk-model-small-en-us-0.15)  — word-boundary timing only
+                                            │       ├─> CMU Pronouncing Dictionary (cmudict-0.7b)
+                                            │       ├─> Needleman-Wunsch alignment
+                                            │       └─> Weighted accuracy / fluency / completeness → ELPAC level
+                                            └─> MainScreen (Compose)
+                                                    ├─> Waveform + level meter
+                                                    ├─> PhonemeTimeline + ScoreRings
+                                                    └─> TranscriptFeedbackSection  (word + phoneme feedback)
 ```
 
 **Key files**
 
 | File | Role |
 |---|---|
-| `MainViewModel.kt` | Recording workflow and analysis-pipeline orchestrator; model status state machine |
+| `MainViewModel.kt` | Recording and file-upload workflows; WAV parsing (`readWavSamples`); analysis-pipeline orchestrator; model status state machine |
 | `WavLMPhonemeDetector.kt` | ONNX download + SHA-256 verify + session init; PCM normalisation; CTC greedy decode with length-mark merge and posterior threshold |
 | `PhonemeDetector.kt` | Vosk word timing, CMU-dict lookup, Needleman-Wunsch alignment, weighted accuracy / fluency / completeness, ELPAC mapping |
 | `PhonemeModels.kt` | Data classes, ARPABET↔IPA mappings, 22 ELPAC preset phrases |

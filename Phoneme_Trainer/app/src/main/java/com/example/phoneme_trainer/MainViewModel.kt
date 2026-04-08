@@ -3,6 +3,7 @@ package com.example.phoneme_trainer
 import android.Manifest
 import android.app.Application
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -26,6 +27,9 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import java.io.IOException
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 
 private const val TAG = "MainVM"
 
@@ -216,15 +220,106 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun stopRecording() {
         recorder.stop()
         recordingJob?.cancel()
+        val samples = recorder.getAllSamples()
         _uiState.update { it.copy(recordingState = RecordingState.PROCESSING, liveLevel = 0f) }
-        viewModelScope.launch { analyzeRecording() }
+        viewModelScope.launch { analyzeRecording(samples) }
+    }
+
+    // ── File upload ────────────────────────────────────────────────────────
+
+    fun analyzeFromFile(uri: Uri) {
+        if (_uiState.value.modelStatus != ModelStatus.READY) return
+        _uiState.update {
+            it.copy(
+                recordingState = RecordingState.PROCESSING,
+                session = null,
+                selectedPhoneme = null,
+                errorMessage = null,
+                elpacLevel = null
+            )
+        }
+        viewModelScope.launch {
+            try {
+                val samples = withContext(Dispatchers.IO) { readWavSamples(uri) }
+                analyzeRecording(samples)
+            } catch (e: Exception) {
+                Log.e(TAG, "File load failed", e)
+                _uiState.update {
+                    it.copy(
+                        recordingState = RecordingState.ERROR,
+                        errorMessage = "Could not read audio file: ${e.message}"
+                    )
+                }
+            }
+        }
+    }
+
+    /**
+     * Reads a WAV file from a content URI and returns raw 16kHz mono 16-bit PCM samples.
+     * Rejects files that are not uncompressed PCM, not mono, or not 16 kHz.
+     */
+    private fun readWavSamples(uri: Uri): ShortArray {
+        val ctx = getApplication<Application>()
+        val bytes = ctx.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+            ?: throw IOException("Could not open file")
+        val buf = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
+
+        val riff = ByteArray(4).also { buf.get(it) }
+        if (String(riff) != "RIFF") throw IOException("Not a WAV file (missing RIFF header)")
+        buf.int  // file size
+        val wave = ByteArray(4).also { buf.get(it) }
+        if (String(wave) != "WAVE") throw IOException("Not a WAV file (missing WAVE marker)")
+
+        var audioFormat  = 0
+        var numChannels  = 0
+        var sampleRate   = 0
+        var bitsPerSample = 0
+        var dataSize     = 0
+        var foundFmt     = false
+        var foundData    = false
+
+        while (buf.remaining() >= 8 && !foundData) {
+            val chunkId   = ByteArray(4).also { buf.get(it) }
+            val chunkSize = buf.int
+            val chunkStart = buf.position()
+            when (String(chunkId)) {
+                "fmt " -> {
+                    audioFormat   = buf.short.toInt() and 0xFFFF
+                    numChannels   = buf.short.toInt() and 0xFFFF
+                    sampleRate    = buf.int
+                    buf.int   // byte rate
+                    buf.short // block align
+                    bitsPerSample = buf.short.toInt() and 0xFFFF
+                    foundFmt = true
+                    buf.position(chunkStart + chunkSize + (chunkSize and 1))
+                }
+                "data" -> {
+                    dataSize  = chunkSize
+                    foundData = true
+                    // buffer position is now at the start of PCM data
+                }
+                else -> buf.position(chunkStart + chunkSize + (chunkSize and 1))
+            }
+        }
+
+        if (!foundFmt)  throw IOException("WAV file is missing fmt chunk")
+        if (!foundData) throw IOException("WAV file is missing data chunk")
+        if (audioFormat != 1)
+            throw IOException("Only uncompressed PCM WAV files are supported (got format $audioFormat)")
+        if (numChannels != 1)
+            throw IOException("Only mono audio is supported (file has $numChannels channels)")
+        if (sampleRate != AudioRecorder.SAMPLE_RATE)
+            throw IOException("Only 16 kHz audio is supported (file is $sampleRate Hz)")
+        if (bitsPerSample != 16)
+            throw IOException("Only 16-bit audio is supported (file is $bitsPerSample-bit)")
+
+        val numSamples = dataSize / 2
+        return ShortArray(numSamples) { buf.short }
     }
 
     // ── Analysis ───────────────────────────────────────────────────────────
 
-    private suspend fun analyzeRecording() {
-        val samples = recorder.getAllSamples()
-
+    private suspend fun analyzeRecording(samples: ShortArray) {
         if (samples.size < AudioRecorder.SAMPLE_RATE / 2) {
             _uiState.update {
                 it.copy(
