@@ -3,6 +3,9 @@ package com.example.phoneme_trainer
 import android.Manifest
 import android.app.Application
 import android.content.pm.PackageManager
+import android.media.MediaCodec
+import android.media.MediaExtractor
+import android.media.MediaFormat
 import android.net.Uri
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
@@ -27,6 +30,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -66,6 +70,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var startTimeMs = 0L
     private val liveWaveformBuffer = mutableListOf<WaveformPoint>()
 
+    // Holds a file URI that arrived before the model was ready; processed once READY.
+    private var pendingFileUri: Uri? = null
+
     init {
         viewModelScope.launch {
             try {
@@ -78,6 +85,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }
                 _uiState.update { it.copy(modelStatus = ModelStatus.READY) }
+                // Process any file that was queued while the model was loading.
+                pendingFileUri?.let { uri ->
+                    pendingFileUri = null
+                    analyzeFromFile(uri)
+                }
             } catch (e: SecurityException) {
                 // Hash mismatch — never auto-retry, always surface to the user.
                 Log.e(TAG, "Model verification failed", e)
@@ -227,8 +239,26 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     // ── File upload ────────────────────────────────────────────────────────
 
+    /** Sets the target phrase (if non-blank) then analyzes the given audio file URI. */
+    fun analyzeFromFileWithPhrase(uri: Uri, phraseText: String) {
+        val trimmed = phraseText.trim()
+        if (trimmed.isNotBlank()) {
+            _uiState.update {
+                it.copy(
+                    targetPhrase = TargetPhrase(trimmed, "Custom"),
+                    customPhraseText = trimmed
+                )
+            }
+        }
+        analyzeFromFile(uri)
+    }
+
     fun analyzeFromFile(uri: Uri) {
-        if (_uiState.value.modelStatus != ModelStatus.READY) return
+        if (_uiState.value.modelStatus != ModelStatus.READY) {
+            // Model is still loading — queue the file and process it once READY.
+            pendingFileUri = uri
+            return
+        }
         _uiState.update {
             it.copy(
                 recordingState = RecordingState.PROCESSING,
@@ -240,7 +270,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
         viewModelScope.launch {
             try {
-                val samples = withContext(Dispatchers.IO) { readWavSamples(uri) }
+                val samples = withContext(Dispatchers.IO) { readAudioSamples(uri) }
                 analyzeRecording(samples)
             } catch (e: Exception) {
                 Log.e(TAG, "File load failed", e)
@@ -255,32 +285,48 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * Reads a WAV file from a content URI and returns raw 16kHz mono 16-bit PCM samples.
-     * Rejects files that are not uncompressed PCM, not mono, or not 16 kHz.
+     * Reads any audio file Android can decode and returns 16 kHz mono 16-bit PCM samples.
+     * Handles WAV (PCM, any sample rate, mono or stereo) via direct parsing, and all other
+     * formats (AAC/M4A, MP3, OGG, FLAC, …) via MediaExtractor + MediaCodec.
      */
-    private fun readWavSamples(uri: Uri): ShortArray {
+    private fun readAudioSamples(uri: Uri): ShortArray {
         val ctx = getApplication<Application>()
+
+        // Read the file once; peek at the header to decide which path to take.
         val bytes = ctx.contentResolver.openInputStream(uri)?.use { it.readBytes() }
             ?: throw IOException("Could not open file")
+
+        if (bytes.size >= 4 && String(bytes, 0, 4) == "RIFF") {
+            return readWavAndConvert(bytes)
+        }
+
+        return decodeWithMediaCodec(uri)
+    }
+
+    /**
+     * Parses a PCM WAV byte array and converts to 16 kHz mono 16-bit samples.
+     * Handles stereo (downmixes to mono) and arbitrary sample rates (resamples).
+     */
+    private fun readWavAndConvert(bytes: ByteArray): ShortArray {
         val buf = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
 
         val riff = ByteArray(4).also { buf.get(it) }
-        if (String(riff) != "RIFF") throw IOException("Not a WAV file (missing RIFF header)")
+        if (String(riff) != "RIFF") throw IOException("Not a WAV file")
         buf.int  // file size
         val wave = ByteArray(4).also { buf.get(it) }
         if (String(wave) != "WAVE") throw IOException("Not a WAV file (missing WAVE marker)")
 
-        var audioFormat  = 0
-        var numChannels  = 0
-        var sampleRate   = 0
+        var audioFormat   = 0
+        var numChannels   = 0
+        var sampleRate    = 0
         var bitsPerSample = 0
-        var dataSize     = 0
-        var foundFmt     = false
-        var foundData    = false
+        var dataSize      = 0
+        var foundFmt      = false
+        var foundData     = false
 
         while (buf.remaining() >= 8 && !foundData) {
-            val chunkId   = ByteArray(4).also { buf.get(it) }
-            val chunkSize = buf.int
+            val chunkId    = ByteArray(4).also { buf.get(it) }
+            val chunkSize  = buf.int
             val chunkStart = buf.position()
             when (String(chunkId)) {
                 "fmt " -> {
@@ -296,7 +342,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 "data" -> {
                     dataSize  = chunkSize
                     foundData = true
-                    // buffer position is now at the start of PCM data
                 }
                 else -> buf.position(chunkStart + chunkSize + (chunkSize and 1))
             }
@@ -305,16 +350,136 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (!foundFmt)  throw IOException("WAV file is missing fmt chunk")
         if (!foundData) throw IOException("WAV file is missing data chunk")
         if (audioFormat != 1)
-            throw IOException("Only uncompressed PCM WAV files are supported (got format $audioFormat)")
-        if (numChannels != 1)
-            throw IOException("Only mono audio is supported (file has $numChannels channels)")
-        if (sampleRate != AudioRecorder.SAMPLE_RATE)
-            throw IOException("Only 16 kHz audio is supported (file is $sampleRate Hz)")
+            throw IOException("Compressed WAV is not supported (format $audioFormat). Use PCM WAV, M4A, or MP3.")
         if (bitsPerSample != 16)
-            throw IOException("Only 16-bit audio is supported (file is $bitsPerSample-bit)")
+            throw IOException("Only 16-bit WAV files are supported (file is $bitsPerSample-bit)")
 
-        val numSamples = dataSize / 2
-        return ShortArray(numSamples) { buf.short }
+        val totalSamples = dataSize / 2
+        val rawSamples   = ShortArray(totalSamples) { buf.short }
+
+        // Downmix stereo (or higher) to mono.
+        val monoSamples = if (numChannels > 1) {
+            ShortArray(totalSamples / numChannels) { i ->
+                var sum = 0
+                for (c in 0 until numChannels) sum += rawSamples[i * numChannels + c]
+                (sum / numChannels).toShort()
+            }
+        } else rawSamples
+
+        // Resample to 16 kHz.
+        return if (sampleRate != AudioRecorder.SAMPLE_RATE) {
+            resampleLinear(monoSamples, sampleRate, AudioRecorder.SAMPLE_RATE)
+        } else monoSamples
+    }
+
+    /**
+     * Uses MediaExtractor + MediaCodec to decode any Android-supported compressed format
+     * (AAC/M4A, MP3, OGG, FLAC, …) to raw PCM, then converts to 16 kHz mono 16-bit.
+     */
+    private fun decodeWithMediaCodec(uri: Uri): ShortArray {
+        val ctx       = getApplication<Application>()
+        val extractor = MediaExtractor()
+        extractor.setDataSource(ctx, uri, null)
+
+        var audioTrackIndex = -1
+        var format: MediaFormat? = null
+        for (i in 0 until extractor.trackCount) {
+            val trackFormat = extractor.getTrackFormat(i)
+            val mime = trackFormat.getString(MediaFormat.KEY_MIME) ?: continue
+            if (mime.startsWith("audio/")) {
+                audioTrackIndex = i
+                format = trackFormat
+                break
+            }
+        }
+        if (audioTrackIndex < 0 || format == null) {
+            extractor.release()
+            throw IOException("No audio track found in file")
+        }
+
+        extractor.selectTrack(audioTrackIndex)
+        val mime          = format.getString(MediaFormat.KEY_MIME)!!
+        val sourceSR      = format.getInteger(MediaFormat.KEY_SAMPLE_RATE)
+        val channelCount  = format.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
+
+        val codec = MediaCodec.createDecoderByType(mime)
+        codec.configure(format, null, null, 0)
+        codec.start()
+
+        val pcmOut   = ByteArrayOutputStream()
+        val info     = MediaCodec.BufferInfo()
+        var inputDone  = false
+        var outputDone = false
+
+        while (!outputDone) {
+            if (!inputDone) {
+                val inIndex = codec.dequeueInputBuffer(10_000L)
+                if (inIndex >= 0) {
+                    val inBuf     = codec.getInputBuffer(inIndex)!!
+                    val sampleSz  = extractor.readSampleData(inBuf, 0)
+                    if (sampleSz < 0) {
+                        codec.queueInputBuffer(inIndex, 0, 0, 0L, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+                        inputDone = true
+                    } else {
+                        codec.queueInputBuffer(inIndex, 0, sampleSz, extractor.sampleTime, 0)
+                        extractor.advance()
+                    }
+                }
+            }
+
+            when (val outIndex = codec.dequeueOutputBuffer(info, 10_000L)) {
+                MediaCodec.INFO_TRY_AGAIN_LATER -> { /* spin */ }
+                MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> { /* ignore */ }
+                else -> if (outIndex >= 0) {
+                    val outBuf = codec.getOutputBuffer(outIndex)!!
+                    val chunk  = ByteArray(info.size)
+                    outBuf.get(chunk)
+                    pcmOut.write(chunk)
+                    codec.releaseOutputBuffer(outIndex, false)
+                    if (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) {
+                        outputDone = true
+                    }
+                }
+            }
+        }
+
+        codec.stop()
+        codec.release()
+        extractor.release()
+
+        // Convert decoded bytes → ShortArray (little-endian 16-bit PCM).
+        val pcmBytes    = pcmOut.toByteArray()
+        val shortBuf    = ByteBuffer.wrap(pcmBytes).order(ByteOrder.LITTLE_ENDIAN)
+        val totalShorts = pcmBytes.size / 2
+        val allSamples  = ShortArray(totalShorts) { shortBuf.short }
+
+        // Downmix to mono.
+        val monoSamples = if (channelCount > 1) {
+            ShortArray(totalShorts / channelCount) { i ->
+                var sum = 0
+                for (c in 0 until channelCount) sum += allSamples[i * channelCount + c]
+                (sum / channelCount).toShort()
+            }
+        } else allSamples
+
+        // Resample to 16 kHz.
+        return if (sourceSR != AudioRecorder.SAMPLE_RATE) {
+            resampleLinear(monoSamples, sourceSR, AudioRecorder.SAMPLE_RATE)
+        } else monoSamples
+    }
+
+    /** Linear interpolation resampler. */
+    private fun resampleLinear(input: ShortArray, srcRate: Int, dstRate: Int): ShortArray {
+        val ratio        = srcRate.toDouble() / dstRate
+        val outputLength = (input.size / ratio).toInt()
+        return ShortArray(outputLength) { i ->
+            val srcPos   = i * ratio
+            val srcIndex = srcPos.toInt()
+            val frac     = srcPos - srcIndex
+            val a        = input.getOrElse(srcIndex) { 0 }.toDouble()
+            val b        = input.getOrElse(srcIndex + 1) { 0 }.toDouble()
+            (a + frac * (b - a)).toInt().toShort()
+        }
     }
 
     // ── Analysis ───────────────────────────────────────────────────────────

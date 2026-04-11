@@ -19,6 +19,7 @@ import androidx.compose.material.icons.rounded.Mic
 import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -38,9 +39,16 @@ import kotlin.math.roundToInt
 @Composable
 fun MainScreen(viewModel: MainViewModel) {
     val uiState by viewModel.uiState.collectAsState()
+
+    var showUploadDialog by rememberSaveable { mutableStateOf(false) }
+    var dialogPhraseText by rememberSaveable { mutableStateOf("") }
+
     val fileLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.GetContent()
-    ) { uri -> uri?.let { viewModel.analyzeFromFile(it) } }
+    ) { uri ->
+        showUploadDialog = false
+        uri?.let { viewModel.analyzeFromFileWithPhrase(it, dialogPhraseText) }
+    }
 
     Box(
         modifier = Modifier
@@ -106,7 +114,10 @@ fun MainScreen(viewModel: MainViewModel) {
                     uiState.recordingState == RecordingState.IDLE ||
                     uiState.recordingState == RecordingState.DONE
                 ) {
-                    TextButton(onClick = { fileLauncher.launch("audio/*") }) {
+                    TextButton(onClick = {
+                        dialogPhraseText = uiState.targetPhrase?.text ?: uiState.customPhraseText
+                        showUploadDialog = true
+                    }) {
                         Icon(
                             Icons.Default.FileUpload,
                             contentDescription = "Upload audio file",
@@ -116,6 +127,15 @@ fun MainScreen(viewModel: MainViewModel) {
                         Spacer(Modifier.width(6.dp))
                         Text("Upload audio file", color = Color(0xFF9E9E9E), fontSize = 13.sp)
                     }
+                }
+
+                if (showUploadDialog) {
+                    UploadAudioDialog(
+                        phraseText = dialogPhraseText,
+                        onPhraseChange = { dialogPhraseText = it },
+                        onPickFile = { fileLauncher.launch("audio/*") },
+                        onDismiss = { showUploadDialog = false }
+                    )
                 }
             }
 
@@ -680,6 +700,81 @@ private fun phonemesMatchUi(a: String, b: String): Boolean {
         setOf("t", "d"),  setOf("k", "ɡ"),   setOf("ʃ", "ʒ")
     )
     return similar.any { it.contains(a) && it.contains(b) }
+}
+
+// ── Upload audio dialog ───────────────────────────────────────────────────────
+
+@Composable
+private fun UploadAudioDialog(
+    phraseText: String,
+    onPhraseChange: (String) -> Unit,
+    onPickFile: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    Dialog(onDismissRequest = onDismiss) {
+        Card(
+            shape = RoundedCornerShape(16.dp),
+            colors = CardDefaults.cardColors(containerColor = Color(0xFF1A1A2E)),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column(
+                modifier = Modifier.padding(24.dp),
+                verticalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
+                Text(
+                    "Upload Audio File",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    color = Color.White
+                )
+                OutlinedTextField(
+                    value = phraseText,
+                    onValueChange = onPhraseChange,
+                    label = { Text("Target phrase (optional)") },
+                    placeholder = { Text("e.g. The cat sat on the mat") },
+                    singleLine = false,
+                    maxLines = 3,
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                    keyboardActions = KeyboardActions(onDone = { onPickFile() }),
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = Color(0xFF4FC3F7),
+                        unfocusedBorderColor = Color(0xFF424242),
+                        focusedLabelColor = Color(0xFF4FC3F7),
+                        unfocusedLabelColor = Color(0xFF9E9E9E),
+                        cursorColor = Color(0xFF4FC3F7),
+                        focusedTextColor = Color.White,
+                        unfocusedTextColor = Color.White
+                    )
+                )
+                Text(
+                    "Leave blank to detect phonemes without alignment.",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Color(0xFF616161)
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)
+                ) {
+                    TextButton(onClick = onDismiss) {
+                        Text("Cancel", color = Color(0xFF9E9E9E))
+                    }
+                    Button(
+                        onClick = onPickFile,
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF4FC3F7))
+                    ) {
+                        Icon(
+                            Icons.Default.FileUpload,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Text("Pick audio file", color = Color(0xFF0D0D1A))
+                    }
+                }
+            }
+        }
+    }
 }
 
 // ── Existing composables (unchanged) ──────────────────────────────────────────
